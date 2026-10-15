@@ -2,8 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
-#include <cstring>
 #include <type_traits>
 
 #include "llama-impl.h"
@@ -21,27 +19,6 @@
 //
 // llama_memory_hybrid_idx
 //
-
-// LLAMA_QSA_KV_HOST=1: the attention cache is in mapped host memory, the sparse attention reads the selected rows in place
-static bool llama_qsa_kv_host() {
-    const char * env = getenv("LLAMA_QSA_KV_HOST");
-    return env != nullptr && atoi(env) != 0;
-}
-
-// LLAMA_QSA_IDX_TYPE: the type of the indexer cache, the type of the K cache by default
-static ggml_type llama_qsa_idx_type(ggml_type type_k) {
-    const char * env = getenv("LLAMA_QSA_IDX_TYPE");
-    if (env == nullptr) {
-        return type_k;
-    }
-    for (int t = 0; t < GGML_TYPE_COUNT; ++t) {
-        const char * name = ggml_type_name((ggml_type) t);
-        if (name != nullptr && strcmp(name, env) == 0) {
-            return (ggml_type) t;
-        }
-    }
-    throw std::runtime_error(format("LLAMA_QSA_IDX_TYPE: unknown type %s", env));
-}
 
 llama_memory_hybrid_idx::llama_memory_hybrid_idx(
         const llama_model & model,
@@ -65,13 +42,15 @@ llama_memory_hybrid_idx::llama_memory_hybrid_idx(
                             /* layer filters */
     const layer_filter_cb & filter_attn,
     const layer_filter_cb & filter_recr,
-    const layer_filter_cb & filter_idx) :
+    const layer_filter_cb & filter_idx,
+                ggml_type   type_k_idx,
+                     bool   attn_host_mapped) :
     llama_memory_hybrid(
         model,
         type_k, type_v, v_trans, kv_size, n_pad, n_swa, swa_type,
         type_r, type_s, rs_size,
         n_seq_max, n_rs_seq, offload, unified,
-        filter_attn, filter_recr, offload && filter_idx != nullptr && llama_qsa_kv_host()),
+        filter_attn, filter_recr, offload && filter_idx != nullptr && attn_host_mapped),
     hparams_idx(model.hparams),
     mem_idx(filter_idx == nullptr ? nullptr : [&] {
         // MQA with a single key head of indexer_head_size, as llama_kv_cache_dsa shapes its own
@@ -90,7 +69,7 @@ llama_memory_hybrid_idx::llama_memory_hybrid_idx(
 
         LLAMA_LOG_INFO("%s: creating indexer KV cache, size = %u cells\n", __func__, kv_size);
 
-        const ggml_type type_idx = llama_qsa_idx_type(type_k);
+        const ggml_type type_idx = type_k_idx == GGML_TYPE_COUNT ? type_k : type_k_idx;
         if (type_idx != type_k) {
             LLAMA_LOG_INFO("%s: indexer KV cache type = %s\n", __func__, ggml_type_name(type_idx));
         }

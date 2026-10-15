@@ -359,6 +359,8 @@ llama_context::llama_context(
     cparams.op_offload     = params.op_offload;
     cparams.kv_unified     = params.kv_unified;
     cparams.moe_cache_size = params.moe_cache_size;
+    cparams.moe_cache_hybrid    = params.moe_cache_hybrid;
+    cparams.moe_cache_half_life = params.moe_cache_half_life;
 
     // initialized later
     cparams.pipeline_parallel = false;
@@ -474,11 +476,13 @@ llama_context::llama_context(
     // init the memory module
     if (!hparams.vocab_only) {
         llama_memory_params params_mem = {
-            /*.type_k    =*/ params.type_k,
-            /*.type_v    =*/ params.type_v,
-            /*.swa_full  =*/ params.swa_full,
-            /*.ctx_type  =*/ cparams.ctx_type,
-            /*.mem_other =*/ llama_get_memory(cparams.ctx_other),
+            /*.type_k         =*/ params.type_k,
+            /*.type_v         =*/ params.type_v,
+            /*.type_k_idx     =*/ params.type_k_idx,
+            /*.kv_host_mapped =*/ params.kv_host_mapped,
+            /*.swa_full       =*/ params.swa_full,
+            /*.ctx_type       =*/ cparams.ctx_type,
+            /*.mem_other      =*/ llama_get_memory(cparams.ctx_other),
         };
 
         memory.reset(model.create_memory(params_mem, cparams));
@@ -549,7 +553,8 @@ llama_context::llama_context(
         }
 
         if (cparams.moe_cache_size > 0) {
-            moe_cache = std::make_unique<llama_moe_cache>(model, backend_ptrs, backend_buft, cparams.moe_cache_size);
+            moe_cache = std::make_unique<llama_moe_cache>(model, backend_ptrs, backend_buft, cparams.moe_cache_size,
+                cparams.moe_cache_hybrid, cparams.moe_cache_half_life);
         }
 
         sched_reserve();
@@ -4001,7 +4006,9 @@ llama_context_params llama_context_default_params() {
         /*.cb_eval_user_data           =*/ nullptr,
         /*.type_k                      =*/ GGML_TYPE_F16,
         /*.type_v                      =*/ GGML_TYPE_F16,
+        /*.type_k_idx                  =*/ GGML_TYPE_COUNT,
         /*.moe_cache_size              =*/ 0,
+        /*.moe_cache_half_life         =*/ 64.0f,
         /*.abort_callback              =*/ nullptr,
         /*.abort_callback_data         =*/ nullptr,
         /*.embeddings                  =*/ false,
@@ -4010,6 +4017,8 @@ llama_context_params llama_context_default_params() {
         /*.op_offload                  =*/ true,
         /*.swa_full                    =*/ true,
         /*.kv_unified                  =*/ false,
+        /*.moe_cache_hybrid            =*/ false,
+        /*.kv_host_mapped              =*/ false,
         /*.sampler                     =*/ nullptr,
         /*.n_sampler                   =*/ 0,
         /*.ctx_other                   =*/ nullptr,

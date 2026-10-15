@@ -19,6 +19,12 @@ struct llama_memory_params {
     ggml_type type_k;
     ggml_type type_v;
 
+    // K cache of a sparse attention indexer, GGML_TYPE_COUNT = type_k
+    ggml_type type_k_idx;
+
+    // keep the KV cache of sparse attention layers in pinned host memory that the GPU reads in place
+    bool kv_host_mapped;
+
     // use full-size SWA cache
     bool swa_full;
 

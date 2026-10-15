@@ -39,7 +39,11 @@ public:
     const layer_filter_cb & filter_attn,
     const layer_filter_cb & filter_recr,
                             /* the indexer cache exists only if this is given */
-    const layer_filter_cb & filter_idx);
+    const layer_filter_cb & filter_idx,
+                            /* the type of the indexer cache, GGML_TYPE_COUNT = type_k */
+                ggml_type   type_k_idx = GGML_TYPE_COUNT,
+                            /* the attention cache in mapped host memory, see llama_kv_cache */
+                     bool   attn_host_mapped = false);
 
     // Defined out of line because kpool_layout is incomplete here.
     ~llama_memory_hybrid_idx();

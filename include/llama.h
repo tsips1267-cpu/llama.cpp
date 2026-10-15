@@ -395,8 +395,10 @@ extern "C" {
 
         enum ggml_type type_k; // data type for K cache [EXPERIMENTAL]
         enum ggml_type type_v; // data type for V cache [EXPERIMENTAL]
+        enum ggml_type type_k_idx; // data type for the K cache of a sparse attention indexer, GGML_TYPE_COUNT = type_k [EXPERIMENTAL]
 
         size_t moe_cache_size; // device cache in bytes for the experts kept in host memory, split among the devices like the layers, 0 = disabled [EXPERIMENTAL]
+        float  moe_cache_half_life; // hybrid MoE cache: half-life in decode steps of the access counts that decide which experts are cached [EXPERIMENTAL]
 
         // Abort callback
         // if it returns true, execution of llama_decode() will be aborted
@@ -415,6 +417,8 @@ extern "C" {
         bool kv_unified;  // use a unified buffer across the input sequences when computing the attention
                           // try to disable when n_seq_max > 1 for improved performance when the sequences do not share a large prefix
                           // ref: https://github.com/ggml-org/llama.cpp/pull/14363
+        bool moe_cache_hybrid; // MoE cache: the GPU runs the cached experts while the CPU runs the misses [EXPERIMENTAL]
+        bool kv_host_mapped;   // keep the KV cache of sparse attention layers in pinned host memory that the GPU reads in place [EXPERIMENTAL]
 
         // [EXPERIMENTAL]
         // backend sampler chain configuration (make sure the caller keeps the sampler chains alive)

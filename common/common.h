@@ -596,6 +596,11 @@ struct common_params {
     ggml_type cache_type_v = GGML_TYPE_F16; // KV cache data type for the V
 
     size_t moe_cache_size = 0; // GPU cache size in bytes for the MoE experts kept in the CPU, split among the GPUs like the layers
+    bool   moe_cache_hybrid = false;     // the GPU runs the cached experts while the CPU runs the misses
+    float  moe_cache_half_life = 64.0f;  // hybrid MoE cache: half-life in decode steps of the access counts that decide which experts are cached
+
+    ggml_type cache_type_k_idx = GGML_TYPE_COUNT; // KV cache data type for the keys of a sparse attention indexer, GGML_TYPE_COUNT = cache_type_k
+    bool      kv_host_mapped   = false;           // keep the KV cache of sparse attention layers in pinned host memory that the GPU reads in place
 
     common_conversation_mode conversation_mode = COMMON_CONVERSATION_MODE_AUTO;
 

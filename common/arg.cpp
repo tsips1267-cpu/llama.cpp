@@ -2464,6 +2464,26 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_CACHE_TYPE_V"));
     add_opt(common_arg(
+        {"-ctki", "--cache-type-k-idx"}, "TYPE",
+        string_format(
+            "KV cache data type for the keys of a sparse attention indexer\n"
+            "allowed values: %s\n"
+            "(default: same as --cache-type-k)",
+            get_all_kv_cache_types().c_str()
+        ),
+        [](common_params & params, const std::string & value) {
+            params.cache_type_k_idx = kv_cache_type_from_str(value);
+        }
+    ).set_env("LLAMA_ARG_CACHE_TYPE_K_IDX"));
+    add_opt(common_arg(
+        {"--kv-host-mapped"},
+        {"--no-kv-host-mapped"},
+        "keep the KV cache of sparse attention layers (qwen4exp QSA) in pinned host memory that the GPU reads in place, the indexer cache stays on the GPU (default: disabled) [EXPERIMENTAL]",
+        [](common_params & params, bool value) {
+            params.kv_host_mapped = value;
+        }
+    ).set_env("LLAMA_ARG_KV_HOST_MAPPED"));
+    add_opt(common_arg(
         {"--hellaswag"},
         "compute HellaSwag score over random tasks from datafile supplied with -f",
         [](common_params & params) {
@@ -2787,6 +2807,24 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.moe_cache_size = (size_t) value*1024*1024;
         }
     ).set_env("LLAMA_ARG_MOE_CACHE_MIB"));
+    add_opt(common_arg(
+        {"--moe-cache-hybrid"},
+        {"--no-moe-cache-hybrid"},
+        "with --moe-cache-mib: the GPU runs the cached experts while the CPU runs the misses, which are cached by decayed access count (default: disabled) [EXPERIMENTAL]",
+        [](common_params & params, bool value) {
+            params.moe_cache_hybrid = value;
+        }
+    ).set_env("LLAMA_ARG_MOE_CACHE_HYBRID"));
+    add_opt(common_arg(
+        {"--moe-cache-half-life"}, "N",
+        string_format("hybrid MoE cache: half-life in decode steps of the access counts that decide which experts are cached (default: %.0f)", (double) params.moe_cache_half_life),
+        [](common_params & params, const std::string & value) {
+            params.moe_cache_half_life = std::stof(value);
+            if (params.moe_cache_half_life < 1.0f) {
+                throw std::invalid_argument("invalid value");
+            }
+        }
+    ).set_env("LLAMA_ARG_MOE_CACHE_HALF_LIFE"));
     add_opt(common_arg(
         {"-ncffn", "--n-cpu-ffn"}, "N",
         "keep the dense FFN weights of the first N layers in the CPU\n"

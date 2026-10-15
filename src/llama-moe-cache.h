@@ -14,7 +14,9 @@ struct llama_model;
 class llama_moe_cache {
 public:
     // backends are all the backends of the context, each GPU gets its own cache of the given size for the layers assigned to it
-    llama_moe_cache(const llama_model & model, const std::vector<ggml_backend_t> & backends, const std::vector<ggml_backend_buffer_type_t> & bufts, size_t size);
+    // hybrid: the GPU runs the cached experts while the CPU runs the misses, which are cached by access counts with this half-life in decode steps
+    llama_moe_cache(const llama_model & model, const std::vector<ggml_backend_t> & backends, const std::vector<ggml_backend_buffer_type_t> & bufts, size_t size,
+                    bool hybrid = false, float half_life = 64.0f);
     ~llama_moe_cache();
 
     // the device that caches layer il
@@ -26,7 +28,7 @@ public:
     // the experts of w in the cache, nullptr if w is not cached
     ggml_tensor * get_experts(const ggml_tensor * w) const;
 
-    // hybrid mode (LLAMA_MOE_CACHE_HYBRID=1): the GPU reads the misses from all-zero slots and the CPU runs them
+    // hybrid mode: the GPU reads the misses from all-zero slots and the CPU runs them
     bool hybrid() const;
 
     // hybrid mode, in host memory and written by the lookup of layer il for the CPU half:

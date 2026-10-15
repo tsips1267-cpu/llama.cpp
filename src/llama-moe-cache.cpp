@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <set>
@@ -321,9 +320,9 @@ struct llama_moe_cache::impl {
 
     int32_t n_expert_used;
 
-    // LLAMA_MOE_CACHE_HYBRID=1: the misses run on the CPU while the GPU runs the hits, see moe_cache_lfu
+    // the misses run on the CPU while the GPU runs the hits, see moe_cache_lfu
     bool   hybrid    = false;
-    double half_life = 64.0; // LLAMA_MOE_CACHE_HALF_LIFE, in steps
+    double half_life = 64.0; // in steps
     size_t n_admit   = 0;
 
     stats stats_small; // up to 8 tokens per ubatch
@@ -348,8 +347,9 @@ struct llama_moe_cache::impl {
     // views used by copy_experts
     ggml_context_ptr ctx_views;
 
-    impl(const llama_model & model, const std::vector<ggml_backend_t> & backends, const std::vector<ggml_backend_buffer_type_t> & bufts, size_t size) :
-            n_expert_used(model.hparams.n_expert_used_max()), layers(model.layers.size()) {
+    impl(const llama_model & model, const std::vector<ggml_backend_t> & backends, const std::vector<ggml_backend_buffer_type_t> & bufts, size_t size,
+         bool hybrid, float half_life) :
+            n_expert_used(model.hparams.n_expert_used_max()), hybrid(hybrid), half_life(std::max(1.0f, half_life)), layers(model.layers.size()) {
         for (size_t i = 0; i < backends.size(); ++i) {
             const auto dev_type = ggml_backend_dev_type(ggml_backend_get_device(backends[i]));
             if (dev_type == GGML_BACKEND_DEVICE_TYPE_GPU || dev_type == GGML_BACKEND_DEVICE_TYPE_IGPU) {
@@ -366,12 +366,6 @@ struct llama_moe_cache::impl {
         }
         if (model.hparams.n_expert == 0 || n_expert_used == 0) {
             throw std::runtime_error("MoE cache requires a MoE model");
-        }
-        if (const char * env = getenv("LLAMA_MOE_CACHE_HYBRID")) {
-            hybrid = atoi(env) != 0;
-        }
-        if (const char * env = getenv("LLAMA_MOE_CACHE_HALF_LIFE")) {
-            half_life = std::max(1.0, atof(env));
         }
 
         // only cache layers that keep all of their experts in host memory, on the device the layer is assigned to
@@ -790,8 +784,9 @@ struct llama_moe_cache::impl {
     }
 };
 
-llama_moe_cache::llama_moe_cache(const llama_model & model, const std::vector<ggml_backend_t> & backends, const std::vector<ggml_backend_buffer_type_t> & bufts, size_t size) :
-    pimpl(new impl(model, backends, bufts, size)) {
+llama_moe_cache::llama_moe_cache(const llama_model & model, const std::vector<ggml_backend_t> & backends, const std::vector<ggml_backend_buffer_type_t> & bufts, size_t size,
+                                 bool hybrid, float half_life) :
+    pimpl(new impl(model, backends, bufts, size, hybrid, half_life)) {
 }
 
 llama_moe_cache::~llama_moe_cache() = default;
