@@ -114,7 +114,9 @@ public:
         const  layer_reuse_cb & reuse,
         const  layer_share_cb & share,
         // a model can hold more than one cache, so the tensor names have to stay unique
-                 const char *   name_tag = "");
+                 const char *   name_tag = "",
+        // keep the tensors in pinned host memory that the devices read in place, see ggml_backend_dev_mapped_buffer_type_t
+                       bool   host_mapped = false);
 
     ~llama_kv_cache() = default;
 
@@ -160,6 +162,9 @@ public:
     uint32_t get_n_stream() const;
 
     bool get_has_shift() const;
+
+    // the tensors are in pinned host memory that the devices read in place
+    bool get_host_mapped() const { return host_mapped; }
 
     ggml_type type_k() const;
     ggml_type type_v() const;
@@ -267,6 +272,7 @@ private:
     };
 
     bool v_trans = true;  // the value tensor is transposed
+    bool host_mapped = false;
 
     const uint32_t n_seq_max = 1;
     const uint32_t n_stream  = 1;
@@ -399,6 +405,8 @@ public:
     //
 
     uint32_t get_n_kv() const;
+
+    bool get_host_mapped() const;
 
     ggml_type type_k() const;
     ggml_type type_v() const;

@@ -914,6 +914,19 @@ ggml_tensor * llama_model_qwen4exp::graph::build_attn_qsa(
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
     ggml_tensor * v = mctx_cur->get_v(ctx0, il);
 
+    // a cache in mapped host memory is read in place, n_sel rows per token,
+    // unless the batch reads more rows than the cache holds: then copy the cache to the device first
+    if (mctx_cur->get_host_mapped()) {
+        const int64_t n_stream = k->ne[3];
+        const int64_t n_kv     = k->ne[2];
+        if ((n_tokens/n_stream)*n_sel > n_kv) {
+            k = ggml_cont(ctx0, k);
+            v = ggml_cont(ctx0, v);
+            cb(k, "k_staged", il);
+            cb(v, "v_staged", il);
+        }
+    }
+
     ggml_tensor * cur = build_attn_mha(q, k, v, nullptr, sel, nullptr, nullptr, n_sel, kq_scale, il);
     cb(cur, "kqv_out", il);
 

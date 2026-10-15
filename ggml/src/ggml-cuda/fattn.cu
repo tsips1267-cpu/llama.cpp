@@ -263,6 +263,14 @@ static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols2(ggml_backend_cuda_con
         }
     }
 
+    // K/V read in place from host memory: tile all Q heads of a K/V head together, so each row crosses PCIe once
+    if constexpr (DKQ == 256 && DV == 256) {
+        if (use_gqa_opt && gqa_ratio > 8 && gqa_ratio <= 16 && K->buffer && ggml_backend_buffer_is_host(K->buffer)) {
+            ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<DKQ, DV, 16>(ctx, dst);
+            return;
+        }
+    }
+
     if (use_gqa_opt && gqa_ratio > 4) {
         ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<DKQ, DV, 8>(ctx, dst);
         return;

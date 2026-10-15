@@ -79,12 +79,15 @@ llama_kv_cache::llama_kv_cache(
     const layer_filter_cb & filter,
     const  layer_reuse_cb & reuse,
     const  layer_share_cb & share,
-             const char *   name_tag) :
+             const char *   name_tag,
+                   bool   host_mapped) :
     model(model), hparams(hparams), v_trans(v_trans),
     n_seq_max(n_seq_max), n_stream(unified ? 1 : n_seq_max), n_pad(n_pad), n_swa(n_swa), swa_type(swa_type),
     other(static_cast<llama_kv_cache *>(mem_other)),
     v_cells_impl(other ? other->v_cells_impl : std::make_shared<llama_kv_cells_vec>()),
     v_cells(*v_cells_impl) {
+
+    this->host_mapped = host_mapped;
 
     // shared cells view the source cache's K/V tensors, so the cell count
     // follows the source allocation: a fitted target can be smaller than the
@@ -216,6 +219,16 @@ llama_kv_cache::llama_kv_cache(
         if (offload) {
             auto * dev = model.dev_layer(il);
             buft = ggml_backend_dev_buffer_type(dev);
+
+            if (host_mapped) {
+                auto get_mapped = (ggml_backend_dev_mapped_buffer_type_t)
+                    ggml_backend_reg_get_proc_address(ggml_backend_dev_backend_reg(dev), "ggml_backend_dev_mapped_buffer_type");
+                ggml_backend_buffer_type_t buft_mapped = get_mapped ? get_mapped(dev) : nullptr;
+                if (buft_mapped == nullptr) {
+                    throw std::runtime_error(format("device %s cannot keep the KV cache in mapped host memory", ggml_backend_dev_name(dev)));
+                }
+                buft = buft_mapped;
+            }
 
             dev_name = ggml_backend_dev_name(dev);
         }
@@ -2887,6 +2900,10 @@ const llama_ubatch & llama_kv_cache_context::get_ubatch() const {
 
 uint32_t llama_kv_cache_context::get_n_kv() const {
     return n_kv;
+}
+
+bool llama_kv_cache_context::get_host_mapped() const {
+    return kv->get_host_mapped();
 }
 
 ggml_type llama_kv_cache_context::type_k() const {

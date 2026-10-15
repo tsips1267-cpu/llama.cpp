@@ -1371,6 +1371,75 @@ ggml_backend_buffer_type_t ggml_backend_cuda_host_buffer_type() {
 //    return buffer->buft->iface.get_name == ggml_backend_cuda_host_buffer_type_name;
 //}
 
+// mapped buffer type: pinned host memory that the kernels of one device read and write in place over PCIe
+// for data that is large but sparsely accessed, e.g. a KV cache read through a sparse attention mask
+
+struct ggml_backend_cuda_mapped_buffer_type_context {
+    int device;
+    std::string name;
+};
+
+static const char * ggml_backend_cuda_mapped_buffer_type_name(ggml_backend_buffer_type_t buft) {
+    return ((ggml_backend_cuda_mapped_buffer_type_context *) buft->context)->name.c_str();
+}
+
+static bool ggml_backend_buft_is_cuda_mapped(ggml_backend_buffer_type_t buft) {
+    return buft->iface.get_name == ggml_backend_cuda_mapped_buffer_type_name;
+}
+
+static ggml_backend_buffer_t ggml_backend_cuda_mapped_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft, size_t size) {
+    void * ptr = nullptr;
+    // portable: other devices may copy from it; mapped: the kernels use the host pointer, which needs unified addressing
+    cudaError_t err = cudaHostAlloc(&ptr, std::max<size_t>(size, 1), cudaHostAllocPortable | cudaHostAllocMapped);
+    if (err != cudaSuccess) {
+        (void) cudaGetLastError();
+        GGML_LOG_ERROR("%s: failed to allocate %.2f MiB of mapped pinned memory: %s\n", __func__, size/1024.0/1024.0, cudaGetErrorString(err));
+        return nullptr;
+    }
+    void * dev_ptr = nullptr;
+    CUDA_CHECK(cudaHostGetDevicePointer(&dev_ptr, ptr, 0));
+    GGML_ASSERT(dev_ptr == ptr && "mapped pinned memory requires unified addressing");
+
+    ggml_backend_buffer_t buffer = ggml_backend_cpu_buffer_from_ptr(ptr, size);
+    buffer->buft = buft;
+    buffer->iface.free_buffer = ggml_backend_cuda_host_buffer_free_buffer;
+
+    return buffer;
+}
+
+ggml_backend_buffer_type_t ggml_backend_cuda_mapped_buffer_type(int device) {
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+
+    if (device < 0 || device >= ggml_backend_cuda_get_device_count()) {
+        return nullptr;
+    }
+
+    static ggml_backend_buffer_type ggml_backend_cuda_mapped_buffer_types[GGML_CUDA_MAX_DEVICES];
+    static bool initialized = false;
+    if (!initialized) {
+        for (int i = 0; i < ggml_backend_cuda_get_device_count(); i++) {
+            ggml_backend_cuda_mapped_buffer_types[i] = {
+                /* .iface    = */ {
+                    /* .get_name            = */ ggml_backend_cuda_mapped_buffer_type_name,
+                    /* .alloc_buffer        = */ ggml_backend_cuda_mapped_buffer_type_alloc_buffer,
+                    /* .alloc_buffer_n      = */ NULL,
+                    /* .get_alignment       = */ ggml_backend_cpu_buffer_type()->iface.get_alignment,
+                    /* .get_max_size        = */ NULL, // defaults to SIZE_MAX
+                    /* .get_alloc_size      = */ ggml_backend_cpu_buffer_type()->iface.get_alloc_size,
+                    /* .get_alloc_size_n    = */ NULL,
+                    /* .is_host             = */ ggml_backend_cpu_buffer_type()->iface.is_host,
+                },
+                /* .device   = */ ggml_backend_reg_dev_get(ggml_backend_cuda_reg(), i),
+                /* .context  = */ new ggml_backend_cuda_mapped_buffer_type_context{ i, GGML_CUDA_NAME + std::to_string(i) + "_Mapped" },
+            };
+        }
+        initialized = true;
+    }
+
+    return &ggml_backend_cuda_mapped_buffer_types[device];
+}
+
 /// kernels
 
 typedef void (*ggml_cuda_op_mul_mat_t)(
@@ -5415,6 +5484,11 @@ static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_host_buffer_type(
     return ggml_backend_cuda_host_buffer_type();
 }
 
+static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_mapped_buffer_type(ggml_backend_dev_t dev) {
+    ggml_backend_cuda_device_context * ctx = (ggml_backend_cuda_device_context *) dev->context;
+    return ggml_backend_cuda_mapped_buffer_type(ctx->device);
+}
+
 // TODO: move these functions here
 static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
     ggml_backend_cuda_device_context * dev_ctx = (ggml_backend_cuda_device_context *) dev->context;
@@ -5887,7 +5961,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
 static bool ggml_backend_cuda_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
     ggml_backend_cuda_device_context * dev_ctx = (ggml_backend_cuda_device_context *) dev->context;
     const bool integrated = ggml_cuda_info().devices[dev_ctx->device].integrated;
-    return (ggml_backend_buft_is_cuda(buft) && buft->device == dev) || (integrated && ggml_backend_buft_is_cuda_host(buft));
+    return (ggml_backend_buft_is_cuda(buft) && buft->device == dev) || (integrated && ggml_backend_buft_is_cuda_host(buft)) ||
+        (ggml_backend_buft_is_cuda_mapped(buft) && buft->device == dev);
 }
 
 static int64_t get_op_batch_size(const ggml_tensor * op) {
@@ -6058,6 +6133,9 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     }
     if (strcmp(name, "ggml_backend_get_features") == 0) {
         return (void *)ggml_backend_cuda_get_features;
+    }
+    if (strcmp(name, "ggml_backend_dev_mapped_buffer_type") == 0) {
+        return (void *)ggml_backend_cuda_device_get_mapped_buffer_type;
     }
     return nullptr;
 }
