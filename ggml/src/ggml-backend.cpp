@@ -1875,7 +1875,12 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
 
         // ensure the previous split's async work has completed before we start
         // this split, the allocator may have reused buffer regions across splits
-        if (split->n_inputs == 0 && prev_backend_id >= 0 && prev_backend_id != split_backend_id) {
+        // a host split cannot alias the buffers of a discrete device, so it may run while that device works
+        // note: checks the buffer types, querying the device type can be slow (CUDA reads the device properties)
+        const bool cpu_after_device = prev_backend_id >= 0 &&
+            ggml_backend_buft_is_host(sched->bufts[split_backend_id]) &&
+            !ggml_backend_buft_is_host(sched->bufts[prev_backend_id]);
+        if (split->n_inputs == 0 && prev_backend_id >= 0 && prev_backend_id != split_backend_id && !cpu_after_device) {
             if (sched->events[prev_backend_id][sched->cur_copy] != NULL) {
                 ggml_backend_event_synchronize(sched->events[prev_backend_id][sched->cur_copy]);
             } else {

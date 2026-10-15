@@ -4,6 +4,7 @@
 
 #include <map>
 #include <memory>
+#include <string>
 #include <vector>
 
 struct llama_model;
@@ -24,6 +25,19 @@ public:
 
     // the experts of w in the cache, nullptr if w is not cached
     ggml_tensor * get_experts(const ggml_tensor * w) const;
+
+    // hybrid mode (LLAMA_MOE_CACHE_HYBRID=1): the GPU reads the misses from all-zero slots and the CPU runs them
+    bool hybrid() const;
+
+    // hybrid mode, in host memory and written by the lookup of layer il for the CPU half:
+    // F32 [n_embd, n] the inputs of the layer, read by the lookup from the view of them named cpu_input_name(il)
+    // I32 [n_expert_used, n] the expert id of each miss by position, -1 for a hit
+    ggml_tensor * get_cpu_inp(int32_t il) const;
+    ggml_tensor * get_cpu_ids(int32_t il) const;
+    static std::string cpu_input_name(int32_t il);
+
+    // hybrid mode: the first of the n_expert_used zero slots of layer il, a miss at position k of a selection reads slot zero + k
+    int32_t get_zero_slot(int32_t il) const;
 
     // ggml_backend_sched copy callback, returns false if src is not a slot map
     bool copy(ggml_backend_t backend, const ggml_tensor * src, ggml_tensor * dst, ggml_cgraph * graph);

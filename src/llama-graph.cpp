@@ -2282,8 +2282,40 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     //call early so that topk-moe can be used
     ggml_build_forward_expand(gf, weights);
 
+    // hybrid MoE cache: the GPU runs the cached experts while the CPU runs the misses
+    ggml_tensor * cpu_inp = moe_cache && moe_cache->hybrid() ? moe_cache->get_cpu_inp(il) : nullptr;
+    const auto has_hdmd = [&](ggml_tensor * w) { return hdmd && hdmd->rot.find(w) != hdmd->rot.end(); };
+    const bool moe_hybrid = cpu_inp && gate_exps && up_exps && !gate_up_exps &&
+        !up_exps_b && !gate_exps_b && !down_exps_b && !up_exps_s && !gate_exps_s && !down_exps_s &&
+        type_op == LLM_FFN_SILU && !weight_before_ffn && loras->empty() && hparams.swiglu_clamp_exp[il] <= 1e-6f &&
+        !has_hdmd(up_exps) && !has_hdmd(gate_exps) && !has_hdmd(down_exps) &&
+        moe_cache->get_slot_map(il, n_tokens, n_expert_used) != nullptr;
+
+    // the lookup reads the inputs of the CPU half, they must be contiguous and computed before it
+    if (moe_hybrid && !ggml_is_contiguous(cur)) {
+        cur = ggml_cont(ctx0, cur);
+        ggml_build_forward_expand(gf, cur);
+    }
+
     // the experts of host-resident layers may be read from the MoE cache
     ggml_tensor * slots = build_moe_cache_slots(selected_experts, up_exps, gate_exps, down_exps, gate_up_exps, il);
+    GGML_ASSERT(!moe_hybrid || slots != nullptr);
+
+    if (moe_hybrid) {
+        // a miss reads -1 from the slot map: send it to the zero slot of its position, zero + k, so the experts of a token stay distinct
+        const int32_t zero = moe_cache->get_zero_slot(il);
+        ggml_tensor * s    = ggml_cast(ctx0, slots, GGML_TYPE_F32);
+        ggml_tensor * miss = ggml_clamp(ctx0, ggml_scale(ctx0, s, -1.0f), 0.0f, 1.0f);
+        ggml_tensor * pos  = ggml_arange(ctx0, (float) zero + 1.0f, (float) (zero + 1 + n_expert_used), 1.0f);
+        ggml_backend_sched_set_tensor_backend(sched, pos, moe_cache->backend(il));
+        slots = ggml_cast(ctx0, ggml_add(ctx0, s, ggml_mul(ctx0, miss, pos)), GGML_TYPE_I32);
+        ggml_build_forward_expand(gf, slots);
+
+        // the lookup copies the inputs to the CPU half with the ids, it finds them by this name
+        ggml_tensor * inp = ggml_view_2d(ctx0, cur, n_embd, n_tokens, cur->nb[1], 0);
+        ggml_set_name(inp, llama_moe_cache::cpu_input_name(il).c_str());
+        ggml_build_forward_expand(gf, inp);
+    }
 
     cur = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
 
@@ -2438,6 +2470,25 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         ggml_prec_set_src(experts, GGML_PREC_F32, 1);
     }
     cb(experts, "ffn_moe_down", il);
+
+    if (moe_hybrid) {
+        // queue the GPU half first: the CPU half runs while the GPU works
+        ggml_build_forward_expand(gf, experts);
+
+        // the host copies written by the lookup: the hits read -1 and give zero rows, the misses read zero rows from the GPU half
+        ggml_tensor * cpu_ids = moe_cache->get_cpu_ids(il);
+        ggml_tensor * ids = ggml_view_2d(ctx0, cpu_ids, n_expert_used, n_tokens, cpu_ids->nb[1], 0);
+        ggml_tensor * x   = ggml_view_3d(ctx0, cpu_inp, n_embd, 1, n_tokens, cpu_inp->nb[1], cpu_inp->nb[1], 0);
+
+        ggml_tensor * up_c   = ggml_mul_mat_id(ctx0, up_exps,   x, ids);
+        ggml_tensor * gate_c = ggml_mul_mat_id(ctx0, gate_exps, x, ids);
+        ggml_tensor * exp_c  = ggml_mul_mat_id(ctx0, down_exps, ggml_swiglu_split(ctx0, gate_c, up_c), ids);
+        cb(exp_c, "ffn_moe_down_cpu", il);
+
+        experts = ggml_add(ctx0, experts, exp_c);
+        ggml_backend_sched_set_tensor_backend(sched, experts, moe_cache->backend(il));
+        cb(experts, "ffn_moe_down_hybrid", il);
+    }
 
     if (down_exps_s) {
         cb(experts, "ffn_moe_down_scaled", il);
