@@ -202,6 +202,14 @@ public:
                          ggml_tensor * sel_mask, ggml_tensor * new_pool_idxs, ggml_tensor * new_pool_rep,
                          const llama_ubatch * ubatch, ggml_tensor * new_pool_pos = nullptr) const;
 
+    // qwen4exp, the pools by stream: block s of get_n_kpool_stream() pools holds the pools of the s-th stream of the
+    // ubatch, so a token scores the pools of its own stream only; a unified cache has one block with every sequence
+    // pool_cells (I32 [P*n_stream]), pool_idxs (I32 [kpool, P*n_stream]), pool_mask (F16 [P, n_tokens])
+    uint32_t get_n_kpool_stream() const; // P: padded pools per stream, where the last pool is always unused
+    void set_input_kpool_stream(ggml_tensor * pool_cells, ggml_tensor * pool_idxs, ggml_tensor * pool_mask, ggml_tensor * tail_idxs,
+                         ggml_tensor * new_pool_idxs, ggml_tensor * new_pool_rep, ggml_tensor * new_pool_pos,
+                         const llama_ubatch * ubatch) const;
+
 private:
     llama_memory_hybrid_idx * mem = nullptr;
 
@@ -224,6 +232,8 @@ private:
     kpool_state kpool_build_sizes() const;
     void kpool_build_state(const llama_ubatch & ubatch);
     const kpool_state & kpool_cur() const;
+    void kpool_set_pads(int32_t * nidx, int64_t * nrep, uint32_t n_new, uint32_t n_new_g) const;
+    void kpool_set_tail(int32_t * tidx, const llama_ubatch * ubatch, const std::vector<int64_t> & rank, float * gm, uint32_t n_sel, uint32_t n_top) const;
 
     // unique_ptr because kpool_state is incomplete here.
     std::unique_ptr<kpool_state> kpool_st;
