@@ -2826,6 +2826,45 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_MOE_CACHE_HALF_LIFE"));
     add_opt(common_arg(
+        {"--moe-cache-prefetch"}, "N",
+        "with --moe-cache-mib: upload the experts of the next N expert tensors while a large batch (prompt processing) computes,\n"
+        "each needs device memory for the largest expert tensor, 1-3 hide most of the compute behind the uploads (default: 0 = disabled) [EXPERIMENTAL]",
+        [](common_params & params, int value) {
+            if (value < 0 || value > 8) {
+                throw std::invalid_argument("invalid value");
+            }
+            params.moe_cache_prefetch = value;
+        }
+    ).set_env("LLAMA_ARG_MOE_CACHE_PREFETCH"));
+    add_opt(common_arg(
+        {"--moe-cache-gpu-misses"}, "N",
+        "with --moe-cache-hybrid: up to N missed experts per layer step are uploaded to transient slots and run on the GPU while the CPU runs\n"
+        "the others, when the GPU would otherwise wait for the CPU (default: 0 = all misses on the CPU) [EXPERIMENTAL]",
+        [](common_params & params, int value) {
+            if (value < 0 || value > 64) {
+                throw std::invalid_argument("invalid value");
+            }
+            params.moe_cache_gpu_misses = value;
+        }
+    ).set_env("LLAMA_ARG_MOE_CACHE_GPU_MISSES"));
+    add_opt(common_arg(
+        {"--moe-cache-split"}, "N0,N1,N2,...",
+        "with --moe-cache-mib: share of the MoE cache per GPU, comma-separated proportions like --tensor-split (default: like the layers)",
+        [](common_params & params, const std::string & value) {
+            const std::regex regex{ R"([,/]+)" };
+            std::sregex_token_iterator it{ value.begin(), value.end(), regex, -1 };
+            std::vector<std::string> split_arg{ it, {} };
+            if (split_arg.size() >= llama_max_devices()) {
+                throw std::invalid_argument(
+                    string_format("got %zu input configs, but system only has %zu devices", split_arg.size(), llama_max_devices())
+                );
+            }
+            for (size_t i = 0; i < llama_max_devices(); ++i) {
+                params.moe_cache_split[i] = i < split_arg.size() ? std::stof(split_arg[i]) : 0.0f;
+            }
+        }
+    ).set_env("LLAMA_ARG_MOE_CACHE_SPLIT"));
+    add_opt(common_arg(
         {"-ncffn", "--n-cpu-ffn"}, "N",
         "keep the dense FFN weights of the first N layers in the CPU\n"
         "(dense models; for MoE expert weights use --n-cpu-moe)",

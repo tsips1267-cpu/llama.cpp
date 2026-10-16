@@ -598,6 +598,9 @@ struct common_params {
     size_t moe_cache_size = 0; // GPU cache size in bytes for the MoE experts kept in the CPU, split among the GPUs like the layers
     bool   moe_cache_hybrid = false;     // the GPU runs the cached experts while the CPU runs the misses
     float  moe_cache_half_life = 64.0f;  // hybrid MoE cache: half-life in decode steps of the access counts that decide which experts are cached
+    int32_t moe_cache_prefetch = 0;      // MoE cache: expert tensors uploaded ahead of large batches, 0 = disabled
+    int32_t moe_cache_gpu_misses = 0;    // hybrid MoE cache: misses per lookup that may run on the GPU, 0 = all on the CPU
+    float   moe_cache_split[128] = {0};  // MoE cache: share of the budget per device, all 0 = like the layers
 
     ggml_type cache_type_k_idx = GGML_TYPE_COUNT; // KV cache data type for the keys of a sparse attention indexer, GGML_TYPE_COUNT = cache_type_k
     bool      kv_host_mapped   = false;           // keep the KV cache of sparse attention layers in pinned host memory that the GPU reads in place

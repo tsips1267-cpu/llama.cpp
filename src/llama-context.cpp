@@ -361,6 +361,8 @@ llama_context::llama_context(
     cparams.moe_cache_size = params.moe_cache_size;
     cparams.moe_cache_hybrid    = params.moe_cache_hybrid;
     cparams.moe_cache_half_life = params.moe_cache_half_life;
+    cparams.moe_cache_prefetch  = params.moe_cache_prefetch;
+    cparams.moe_cache_gpu_misses = params.moe_cache_gpu_misses;
 
     // initialized later
     cparams.pipeline_parallel = false;
@@ -554,7 +556,7 @@ llama_context::llama_context(
 
         if (cparams.moe_cache_size > 0) {
             moe_cache = std::make_unique<llama_moe_cache>(model, backend_ptrs, backend_buft, cparams.moe_cache_size,
-                cparams.moe_cache_hybrid, cparams.moe_cache_half_life);
+                cparams.moe_cache_hybrid, cparams.moe_cache_half_life, cparams.moe_cache_prefetch, params.moe_cache_split, cparams.moe_cache_gpu_misses);
         }
 
         sched_reserve();
@@ -2845,6 +2847,10 @@ bool llama_context::sched_copy_experts(ggml_backend_t backend, const ggml_tensor
         first = last + 1;
     }
 
+    if (lctx->moe_cache) {
+        lctx->moe_cache->prefetch_next(backend, src, ids->ne[1]);
+    }
+
     return true;
 }
 
@@ -4009,6 +4015,9 @@ llama_context_params llama_context_default_params() {
         /*.type_k_idx                  =*/ GGML_TYPE_COUNT,
         /*.moe_cache_size              =*/ 0,
         /*.moe_cache_half_life         =*/ 64.0f,
+        /*.moe_cache_prefetch          =*/ 0,
+        /*.moe_cache_gpu_misses        =*/ 0,
+        /*.moe_cache_split             =*/ nullptr,
         /*.abort_callback              =*/ nullptr,
         /*.abort_callback_data         =*/ nullptr,
         /*.embeddings                  =*/ false,

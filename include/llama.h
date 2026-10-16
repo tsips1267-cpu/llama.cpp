@@ -399,6 +399,9 @@ extern "C" {
 
         size_t moe_cache_size; // device cache in bytes for the experts kept in host memory, split among the devices like the layers, 0 = disabled [EXPERIMENTAL]
         float  moe_cache_half_life; // hybrid MoE cache: half-life in decode steps of the access counts that decide which experts are cached [EXPERIMENTAL]
+        int32_t moe_cache_prefetch; // MoE cache: expert tensors uploaded ahead of large batches, each takes a buffer of the largest one, 0 = disabled [EXPERIMENTAL]
+        int32_t moe_cache_gpu_misses; // hybrid MoE cache: misses per lookup that may run on the GPU from transient slots, 0 = all on the CPU [EXPERIMENTAL]
+        const float * moe_cache_split; // MoE cache: share of the budget per device, in the order of the model devices like tensor_split, nullptr = like the layers [EXPERIMENTAL]
 
         // Abort callback
         // if it returns true, execution of llama_decode() will be aborted

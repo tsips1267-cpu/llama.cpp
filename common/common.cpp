@@ -1746,6 +1746,9 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.moe_cache_size      = params.moe_cache_size;
     cparams.moe_cache_hybrid    = params.moe_cache_hybrid;
     cparams.moe_cache_half_life = params.moe_cache_half_life;
+    cparams.moe_cache_prefetch  = params.moe_cache_prefetch;
+    cparams.moe_cache_gpu_misses = params.moe_cache_gpu_misses;
+    cparams.moe_cache_split     = std::any_of(params.moe_cache_split, params.moe_cache_split + 128, [](float x) { return x != 0.0f; }) ? params.moe_cache_split : nullptr;
 
     cparams.type_k_idx     = params.cache_type_k_idx;
     cparams.kv_host_mapped = params.kv_host_mapped;
