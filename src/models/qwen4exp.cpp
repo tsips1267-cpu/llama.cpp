@@ -868,12 +868,18 @@ ggml_tensor * llama_model_qwen4exp::graph::build_qsa_sel(
 
     ggml_tensor * sel = ggml_set_rows(ctx0, mask_all, zeros, ggml_reshape_3d(ctx0, sel_idx, n_sel, n_tokens, 1));
 
-    // a live slot is a visible cell of the token's own sequence, so the selection is already causal and the
-    // dense kq_mask adds nothing: only its shape is used, which leaves it unallocated and unfilled
     GGML_ASSERT(kq_mask->ne[0] == n_kv && kq_mask->ne[1]*kq_mask->ne[2]*kq_mask->ne[3] == n_tokens);
     const size_t row = sel->nb[2];
     sel = ggml_view_4d(ctx0, sel, n_kv, kq_mask->ne[1], kq_mask->ne[2], kq_mask->ne[3],
             row, row*kq_mask->ne[1], row*kq_mask->ne[1]*kq_mask->ne[2], 0);
+
+    // a live slot is a visible cell of the token's own sequence, so for text the selection is already causal and the dense
+    // kq_mask adds nothing: only its shape is used, which leaves it unallocated and unfilled
+    // an image (an embd batch) orders the tokens of a temporal position in raster order, which kq_mask enforces and the selection
+    // does not when the image's cells wrap around the cache; the softmax without flash attention needs a contiguous mask
+    if (ubatch.token == nullptr || !cparams.flash_attn) {
+        sel = ggml_add(ctx0, sel, kq_mask);
+    }
     cb(sel, "indexer_sel", il);
 
     return sel;
@@ -932,9 +938,10 @@ ggml_tensor * llama_model_qwen4exp::graph::build_attn_qsa(
     ggml_tensor * cur = nullptr;
     const int64_t n_stream = k->ne[3];
     const int64_t n_kv     = k->ne[2];
-    const bool staged = mctx_cur->get_host_mapped() && (n_tokens/n_stream)*n_sel > n_kv;
-    if (staged && n_stream > 1 && n_kv*n_stream > 65536) {
-        // one stream at a time, so that only one stream's copy of a large cache is alive
+    // the copy keeps the flash attention layout, without flash attention V is transposed: then read the mapped cache in place
+    const bool staged = cparams.flash_attn && mctx_cur->get_host_mapped() && (n_tokens/n_stream)*n_sel > n_kv;
+    if (staged && n_stream > 1) {
+        // one stream at a time, so that only one stream's copy of the cache is alive, which the graph reserve accounts for
         const int64_t n_tps = n_tokens/n_stream;
         for (int64_t s = 0; s < n_stream; ++s) {
             ggml_tensor * q_s = ggml_view_3d(ctx0, q, q->ne[0], q->ne[1], n_tps, q->nb[1], q->nb[2], s*n_tps*q->nb[2]);

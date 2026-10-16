@@ -280,7 +280,7 @@ struct llama_moe_cache::impl {
         size_t buf_size = 0;
 
         // GPU misses: the admissions the GPU does not run now upload on a second backend of the device, for its stream
-        ggml_backend_t admit = nullptr;
+        ggml_backend_ptr admit;
     };
 
     // layers of the same device with the same expert tensor layout share the banks and the LRU of a group
@@ -303,7 +303,7 @@ struct llama_moe_cache::impl {
         ggml_tensor * cpu_ids = nullptr;    // I32 [n_expert_used, max_batch_hybrid], the expert id of a miss, -1 for a hit
         std::vector<ggml_tensor *> experts; // host expert tensors, in the order of the banks
         // GPU misses: recorded after the admissions of the layer, its next lookup waits for it
-        ggml_backend_event_t ev_admit = nullptr;
+        ggml_backend_event_ptr ev_admit;
         bool admit_pending = false;
     };
 
@@ -354,20 +354,27 @@ struct llama_moe_cache::impl {
     struct prefetch_buf {
         ggml_context_ptr ctx;
         ggml_backend_buffer_ptr buf;
-        ggml_tensor * t = nullptr;  // I8 over the whole buffer
-        int32_t pos = -1;           // position in the device's sequence of expert tensors, -1 if free
-        bool    read = false;       // the compute stream read it since the upload
-        std::vector<uint8_t> ready; // per expert: uploaded
-        ggml_backend_event_t ev_done = nullptr; // copy stream: the upload finished
-        ggml_backend_event_t ev_free = nullptr; // compute stream: the last read finished
+        ggml_tensor * t = nullptr;        // I8 over the whole buffer
+        const ggml_tensor * w = nullptr;  // the host experts it holds or receives, null if free
+        bool read  = false;               // the compute stream read it since the upload
+        bool freed = false;               // ev_free was recorded
+        std::vector<uint8_t> ready;       // per expert: uploaded
+        ggml_backend_event_ptr ev_done;   // copy stream: the upload finished
+        ggml_backend_event_ptr ev_free;   // compute stream: the last read finished
     };
 
+    // the order of the expert tensors is learned from the large batches: a ubatch crops the last layer to its outputs, so that one
+    // takes the small batch path, and the splits may read gate and up in either order
     struct prefetcher {
         int32_t        id      = -1;      // the device
         ggml_backend_t compute = nullptr; // its backend, which runs the large batches
-        ggml_backend_t copy    = nullptr; // a second backend of the device, for its stream
-        std::vector<std::pair<int32_t, int32_t>> seq; // (layer, expert tensor) in the order large batches read them
+        ggml_backend_ptr copy;            // a second backend of the device, for its stream
+        std::vector<const ggml_tensor *> seq; // host experts in layer order, the order until one is learned
+        std::unordered_map<const ggml_tensor *, const ggml_tensor *> next; // the tensor read after each, as last seen
+        const ggml_tensor * last = nullptr;   // the last tensor a large batch read
+        size_t bytes = 0;                     // per buffer, also without an allocation (memory breakdown)
         std::vector<prefetch_buf> bufs;
+        std::vector<const ggml_tensor *> window;
     };
 
     // ubatches from this size on read nearly every expert of a layer, so the prefetch uploads all the uncached ones
@@ -375,7 +382,7 @@ struct llama_moe_cache::impl {
 
     int32_t prefetch_depth = 0;
     prefetcher pf;
-    std::unordered_map<const ggml_tensor *, int32_t> seq_pos; // host experts -> position in the prefetch sequence
+    std::unordered_map<const ggml_tensor *, int32_t> seq_pos; // host experts -> position in pf.seq
     stats stats_prefetch; // hits: experts copied from a prefetch buffer, bytes: uploaded by the prefetch
 
     std::vector<device> devices;
@@ -400,6 +407,9 @@ struct llama_moe_cache::impl {
             n_expert_used(model.hparams.n_expert_used_max()), hybrid(hybrid), half_life(std::max(1.0f, half_life)),
             n_gpu_miss(hybrid ? std::max(0, gpu_misses) : 0),
             prefetch_depth(std::max(0, prefetch_depth)), layers(model.layers.size()) {
+        if (!hybrid && gpu_misses > 0) {
+            LLAMA_LOG_WARN("%s: GPU misses need the hybrid MoE cache, ignored\n", __func__);
+        }
         for (size_t i = 0; i < backends.size(); ++i) {
             const auto dev_type = ggml_backend_dev_type(ggml_backend_get_device(backends[i]));
             if (dev_type == GGML_BACKEND_DEVICE_TYPE_GPU || dev_type == GGML_BACKEND_DEVICE_TYPE_IGPU) {
@@ -645,8 +655,9 @@ struct llama_moe_cache::impl {
             }
         }
 
-        if (prefetch_depth > 0 && !model.hparams.no_alloc) {
-            init_prefetch();
+        if (prefetch_depth > 0) {
+            // sized also without an allocation, the memory breakdown counts the buffers
+            init_prefetch(!model.hparams.no_alloc);
         }
         if (n_gpu_miss > 0 && !model.hparams.no_alloc) {
             init_gpu_misses();
@@ -656,16 +667,16 @@ struct llama_moe_cache::impl {
     void init_gpu_misses() {
         for (size_t id = 0; id < devices.size(); ++id) {
             if (devices[id].buf) {
-                devices[id].admit = ggml_backend_dev_init(ggml_backend_get_device(devices[id].backend), nullptr);
-                if (devices[id].admit == nullptr) {
+                devices[id].admit.reset(ggml_backend_dev_init(ggml_backend_get_device(devices[id].backend), nullptr));
+                if (!devices[id].admit) {
                     throw std::runtime_error("failed to create the MoE cache admission backend");
                 }
             }
         }
         for (layer & l : layers) {
             if (l.ig >= 0) {
-                l.ev_admit = ggml_backend_event_new(ggml_backend_get_device(devices[groups[l.ig].id].backend));
-                if (l.ev_admit == nullptr) {
+                l.ev_admit.reset(ggml_backend_event_new(ggml_backend_get_device(devices[groups[l.ig].id].backend)));
+                if (!l.ev_admit) {
                     throw std::runtime_error("the MoE cache GPU misses need backend events");
                 }
             }
@@ -673,19 +684,18 @@ struct llama_moe_cache::impl {
         LLAMA_LOG_INFO("%s: hybrid: up to %d misses per lookup run on the GPU from transient slots\n", __func__, n_gpu_miss);
     }
 
-    void init_prefetch() {
+    void init_prefetch(bool alloc) {
         // the devices are in the order of the scheduler's backends, op offload picks the first
         const int32_t id = 0;
-        size_t max_bytes = 0;
         for (int32_t il = 0; il < (int32_t) layers.size(); ++il) {
             const layer & l = layers[il];
             if (l.ig < 0) {
                 continue;
             }
-            for (size_t ip = 0; ip < l.experts.size(); ++ip) {
-                seq_pos[l.experts[ip]] = (int32_t) pf.seq.size();
-                pf.seq.push_back({ il, (int32_t) ip });
-                max_bytes = std::max(max_bytes, ggml_nbytes(l.experts[ip]));
+            for (ggml_tensor * w : l.experts) {
+                seq_pos[w] = (int32_t) pf.seq.size();
+                pf.seq.push_back(w);
+                pf.bytes = std::max(pf.bytes, ggml_nbytes(w));
             }
         }
         if (pf.seq.empty()) {
@@ -693,33 +703,35 @@ struct llama_moe_cache::impl {
         }
         pf.id      = id;
         pf.compute = devices[id].backend;
-        {
-            ggml_backend_dev_t dev = ggml_backend_get_device(devices[id].backend);
-            pf.copy = ggml_backend_dev_init(dev, nullptr);
-            if (pf.copy == nullptr) {
-                throw std::runtime_error("failed to create the MoE cache prefetch backend");
+        LLAMA_LOG_INFO("%s: %10s MoE prefetch for large batches: %d x %.2f MiB, %zu expert tensors\n", __func__,
+            ggml_backend_buft_name(devices[id].buft), prefetch_depth, pf.bytes/1024.0/1024.0, pf.seq.size());
+        if (!alloc) {
+            return;
+        }
+
+        ggml_backend_dev_t dev = ggml_backend_get_device(devices[id].backend);
+        pf.copy.reset(ggml_backend_dev_init(dev, nullptr));
+        if (!pf.copy) {
+            throw std::runtime_error("failed to create the MoE cache prefetch backend");
+        }
+        ggml_init_params params = {
+            /*.mem_size   =*/ ggml_tensor_overhead(),
+            /*.mem_buffer =*/ nullptr,
+            /*.no_alloc   =*/ true,
+        };
+        pf.bufs.resize(prefetch_depth);
+        for (prefetch_buf & b : pf.bufs) {
+            b.ctx.reset(ggml_init(params));
+            b.t = ggml_new_tensor_1d(b.ctx.get(), GGML_TYPE_I8, (int64_t) pf.bytes);
+            b.buf.reset(ggml_backend_alloc_ctx_tensors_from_buft(b.ctx.get(), devices[id].buft));
+            if (!b.buf) {
+                throw std::runtime_error("failed to allocate the MoE cache prefetch buffers");
             }
-            ggml_init_params params = {
-                /*.mem_size   =*/ ggml_tensor_overhead(),
-                /*.mem_buffer =*/ nullptr,
-                /*.no_alloc   =*/ true,
-            };
-            pf.bufs.resize(prefetch_depth);
-            for (prefetch_buf & b : pf.bufs) {
-                b.ctx.reset(ggml_init(params));
-                b.t = ggml_new_tensor_1d(b.ctx.get(), GGML_TYPE_I8, (int64_t) max_bytes);
-                b.buf.reset(ggml_backend_alloc_ctx_tensors_from_buft(b.ctx.get(), devices[id].buft));
-                if (!b.buf) {
-                    throw std::runtime_error("failed to allocate the MoE cache prefetch buffers");
-                }
-                b.ev_done = ggml_backend_event_new(dev);
-                b.ev_free = ggml_backend_event_new(dev);
-                if (b.ev_done == nullptr || b.ev_free == nullptr) {
-                    throw std::runtime_error("the MoE cache prefetch needs backend events");
-                }
+            b.ev_done.reset(ggml_backend_event_new(dev));
+            b.ev_free.reset(ggml_backend_event_new(dev));
+            if (!b.ev_done || !b.ev_free) {
+                throw std::runtime_error("the MoE cache prefetch needs backend events");
             }
-            LLAMA_LOG_INFO("%s: %10s MoE prefetch for large batches: %d x %.2f MiB, %zu expert tensors\n", __func__,
-                ggml_backend_buft_name(devices[id].buft), prefetch_depth, max_bytes/1024.0/1024.0, pf.seq.size());
         }
     }
 
@@ -733,29 +745,14 @@ struct llama_moe_cache::impl {
 
     ~impl() {
         log_stats();
+        // the uploads still running write to the banks and the prefetch buffers
         for (device & d : devices) {
             if (d.admit) {
-                ggml_backend_synchronize(d.admit);
-            }
-        }
-        for (layer & l : layers) {
-            ggml_backend_event_free(l.ev_admit);
-        }
-        for (device & d : devices) {
-            if (d.admit) {
-                ggml_backend_free(d.admit);
+                ggml_backend_synchronize(d.admit.get());
             }
         }
         if (pf.copy) {
-            ggml_backend_synchronize(pf.copy);
-        }
-        for (prefetch_buf & b : pf.bufs) {
-            ggml_backend_event_free(b.ev_done);
-            ggml_backend_event_free(b.ev_free);
-        }
-        pf.bufs.clear();
-        if (pf.copy) {
-            ggml_backend_free(pf.copy);
+            ggml_backend_synchronize(pf.copy.get());
         }
     }
 
@@ -798,7 +795,7 @@ struct llama_moe_cache::impl {
         // the admissions of the layer may still be uploading on the admission backend
         layer & lb = layers[b.il];
         if (lb.admit_pending) {
-            ggml_backend_event_wait(backend, lb.ev_admit);
+            ggml_backend_event_wait(backend, lb.ev_admit.get());
             lb.admit_pending = false;
         }
         int64_t n = 1;
@@ -820,23 +817,32 @@ struct llama_moe_cache::impl {
         return n;
     }
 
-    prefetch_buf * prefetch_find(int32_t pos) {
+    prefetch_buf * prefetch_find(const ggml_tensor * w) {
         for (prefetch_buf & b : pf.bufs) {
-            if (b.pos == pos) {
+            if (b.w == w) {
                 return &b;
             }
         }
         return nullptr;
     }
 
+    // the tensor a large batch reads after w: as last seen, or the next one in layer order
+    const ggml_tensor * prefetch_after(const ggml_tensor * w) const {
+        const auto it = pf.next.find(w);
+        if (it != pf.next.end()) {
+            return it->second;
+        }
+        const auto ip = seq_pos.find(w);
+        return ip == seq_pos.end() ? nullptr : pf.seq[(ip->second + 1) % pf.seq.size()];
+    }
+
     // the uncached experts from e on that the prefetch uploaded, copied from its buffer
     int64_t copy_prefetched(ggml_backend_t backend, const ggml_tensor * w, ggml_tensor * dst, int64_t e, int64_t last,
                             const int32_t * slots) {
-        const auto it = seq_pos.find(w);
-        if (it == seq_pos.end() || backend != pf.compute) {
+        if (backend != pf.compute) {
             return 0;
         }
-        prefetch_buf * b = prefetch_find(it->second);
+        prefetch_buf * b = prefetch_find(w);
         if (b == nullptr || !b->ready[e]) {
             return 0;
         }
@@ -846,7 +852,7 @@ struct llama_moe_cache::impl {
         }
 
         if (!b->read) {
-            ggml_backend_event_wait(backend, b->ev_done);
+            ggml_backend_event_wait(backend, b->ev_done.get());
             b->read = true;
         }
 
@@ -865,40 +871,49 @@ struct llama_moe_cache::impl {
         return n;
     }
 
+    void prefetch_release(prefetch_buf & b, ggml_backend_t backend) {
+        if (b.read) {
+            ggml_backend_event_record(b.ev_free.get(), backend);
+            b.freed = true;
+        }
+        b.w    = nullptr;
+        b.read = false;
+    }
+
     // after a large batch read w: free its buffer and keep the next prefetch_depth expert tensors on their way
     void prefetch_next(ggml_backend_t backend, const ggml_tensor * w, int64_t n_tokens) {
-        const auto it = seq_pos.find(w);
-        if (it == seq_pos.end()) {
+        if (pf.bufs.empty() || backend != pf.compute || seq_pos.find(w) == seq_pos.end()) {
             return;
         }
-        if (backend != pf.compute) {
-            return;
+        if (pf.last != nullptr && pf.last != w) {
+            pf.next[pf.last] = w;
         }
-        const int32_t p = it->second;
-        const int32_t n = (int32_t) pf.seq.size();
+        pf.last = w;
 
-        if (prefetch_buf * b = prefetch_find(p)) {
-            if (b->read) {
-                ggml_backend_event_record(b->ev_free, backend);
-            }
-            b->pos  = -1;
-            b->read = false;
+        if (prefetch_buf * b = prefetch_find(w)) {
+            prefetch_release(*b, backend);
         }
 
         if (n_tokens < prefetch_min_batch) {
             return;
         }
 
-        for (int32_t j = 1; j <= std::min(prefetch_depth, n - 1); ++j) {
-            const int32_t q = (p + j) % n;
+        pf.window.clear();
+        for (const ggml_tensor * q = prefetch_after(w); q != nullptr && q != w && (int32_t) pf.window.size() < prefetch_depth; q = prefetch_after(q)) {
+            if (std::find(pf.window.begin(), pf.window.end(), q) != pf.window.end()) {
+                break;
+            }
+            pf.window.push_back(q);
+        }
+
+        for (const ggml_tensor * q : pf.window) {
             if (prefetch_find(q) != nullptr) {
                 continue;
             }
             // a free buffer, or one that holds a tensor outside of the window
             prefetch_buf * b = nullptr;
             for (prefetch_buf & c : pf.bufs) {
-                const int32_t d = c.pos < 0 ? n : (c.pos - p + n) % n;
-                if (d == 0 || d > prefetch_depth) {
+                if (c.w == nullptr || std::find(pf.window.begin(), pf.window.end(), c.w) == pf.window.end()) {
                     b = &c;
                     break;
                 }
@@ -906,23 +921,21 @@ struct llama_moe_cache::impl {
             if (b == nullptr) {
                 break;
             }
-            if (b->read) {
-                ggml_backend_event_record(b->ev_free, backend);
-                b->read = false;
-            }
+            prefetch_release(*b, backend);
 
-            const int32_t il = pf.seq[q].first;
-            const int32_t ip = pf.seq[q].second;
-            const ggml_tensor * hw = layers[il].experts[ip];
+            const binding & bd = bindings.at(q);
+            const int32_t il = bd.il;
             // a layer cached on another device has all its experts uploaded
             const group & g = groups[layers[il].ig];
             const int32_t * slots = g.id != pf.id ? nullptr :
                 hybrid ? g.lfu.slot_of.data() + (size_t) il*g.lfu.n_expert : g.lru.slot_map[il];
-            const int64_t n_expert    = hw->ne[2];
-            const size_t  expert_size = hw->nb[2];
+            const int64_t n_expert    = q->ne[2];
+            const size_t  expert_size = q->nb[2];
 
             // the compute stream may still read the buffer
-            ggml_backend_event_wait(pf.copy, b->ev_free);
+            if (b->freed) {
+                ggml_backend_event_wait(pf.copy.get(), b->ev_free.get());
+            }
             b->ready.assign(n_expert, 0);
             for (int64_t e0 = 0; e0 < n_expert; ) {
                 if (slots != nullptr && slots[e0] >= 0) {
@@ -933,13 +946,13 @@ struct llama_moe_cache::impl {
                 while (e1 < n_expert && (slots == nullptr || slots[e1] < 0)) {
                     e1++;
                 }
-                ggml_backend_tensor_set_async(pf.copy, b->t, (const uint8_t *) hw->data + e0*expert_size, e0*expert_size, (e1 - e0)*expert_size);
+                ggml_backend_tensor_set_async(pf.copy.get(), b->t, (const uint8_t *) q->data + e0*expert_size, e0*expert_size, (e1 - e0)*expert_size);
                 std::fill(b->ready.begin() + e0, b->ready.begin() + e1, 1);
                 stats_prefetch.bytes += (e1 - e0)*expert_size;
                 e0 = e1;
             }
-            ggml_backend_event_record(b->ev_done, pf.copy);
-            b->pos = q;
+            ggml_backend_event_record(b->ev_done.get(), pf.copy.get());
+            b->w = q;
         }
     }
 
@@ -1093,7 +1106,7 @@ struct llama_moe_cache::impl {
             if (n_gpu_miss > 0) {
                 // the hits may read slots that earlier lookups of this layer admitted on the admission backend
                 if (l.admit_pending) {
-                    ggml_backend_event_wait(backend, l.ev_admit);
+                    ggml_backend_event_wait(backend, l.ev_admit.get());
                     l.admit_pending = false;
                 }
                 split_misses(l, g, slots);
@@ -1115,8 +1128,8 @@ struct llama_moe_cache::impl {
         if (n_gpu_miss > 0) {
             bytes += upload(backend, l, g, fills_now);
             if (!fills.empty()) {
-                bytes += upload(devices[g.id].admit, l, g, fills);
-                ggml_backend_event_record(l.ev_admit, devices[g.id].admit);
+                bytes += upload(devices[g.id].admit.get(), l, g, fills);
+                ggml_backend_event_record(l.ev_admit.get(), devices[g.id].admit.get());
                 l.admit_pending = true;
             }
         } else {
@@ -1234,8 +1247,9 @@ std::map<ggml_backend_buffer_type_t, size_t> llama_moe_cache::memory_breakdown()
     if (pimpl->buf_host) {
         res[ggml_backend_buffer_get_type(pimpl->buf_host.get())] += pimpl->buf_host_size;
     }
-    for (const auto & b : pimpl->pf.bufs) {
-        res[ggml_backend_buffer_get_type(b.buf.get())] += ggml_backend_buffer_get_size(b.buf.get());
+    // counted also when the memory is only measured (no_alloc), the buffers are not allocated then
+    if (pimpl->pf.id >= 0) {
+        res[pimpl->devices[pimpl->pf.id].buft] += (size_t) pimpl->prefetch_depth*pimpl->pf.bytes;
     }
     return res;
 }

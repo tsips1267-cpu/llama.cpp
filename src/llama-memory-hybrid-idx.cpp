@@ -805,6 +805,7 @@ void llama_memory_hybrid_idx_context::kpool_set_pads(int32_t * nidx, int64_t * n
 
     int64_t pad_cell = -1;
     for (uint32_t strm = 0; strm < n_stream_kv && pad_cell < 0; ++strm) {
+        // get_cells takes a sequence: a split cache gives sequence s stream s, a unified one has the single stream 0
         const uint32_t used = idx->get_cells(strm).used_max_p1();
         if (used + n_pad <= kv_size) {
             pad_cell = (int64_t) strm*kv_size + used;
