@@ -135,6 +135,8 @@ llama-completion.exe -m models\gemma-1.1-7b-it.Q4_K_M.gguf --ignore-eos -n -1
 | `--no-host` | bypass host buffer allowing extra buffers to be used<br/>(env: LLAMA_ARG_NO_HOST) |
 | `-ctk, --cache-type-k TYPE` | KV cache data type for K<br/>allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1<br/>(default: f16)<br/>(env: LLAMA_ARG_CACHE_TYPE_K) |
 | `-ctv, --cache-type-v TYPE` | KV cache data type for V<br/>allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1<br/>(default: f16)<br/>(env: LLAMA_ARG_CACHE_TYPE_V) |
+| `-ctki, --cache-type-k-idx TYPE` | KV cache data type for the keys of a sparse attention indexer<br/>allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1<br/>(default: same as --cache-type-k)<br/>(env: LLAMA_ARG_CACHE_TYPE_K_IDX) |
+| `--kv-host-mapped, --no-kv-host-mapped` | keep the KV cache of sparse attention layers (qwen4exp QSA) in pinned host memory that the GPU reads in place, the indexer cache stays on the GPU (default: disabled) [EXPERIMENTAL]<br/>(env: LLAMA_ARG_KV_HOST_MAPPED) |
 | `-dt, --defrag-thold N` | KV cache defragmentation threshold (DEPRECATED)<br/>(env: LLAMA_ARG_DEFRAG_THOLD) |
 | `-np, --parallel N` | number of parallel sequences to decode (default: 1)<br/>(env: LLAMA_ARG_N_PARALLEL) |
 | `--rpc SERVERS` | comma-separated list of RPC servers (host:port)<br/>(env: LLAMA_ARG_RPC) |
@@ -146,7 +148,12 @@ llama-completion.exe -m models\gemma-1.1-7b-it.Q4_K_M.gguf --ignore-eos -n -1
 | `-ot, --override-tensor <tensor name pattern>=<buffer type>,...` | override tensor buffer type<br/>(env: LLAMA_ARG_OVERRIDE_TENSOR) |
 | `-cmoe, --cpu-moe` | keep all Mixture of Experts (MoE) weights in the CPU<br/>(env: LLAMA_ARG_CPU_MOE) |
 | `-ncmoe, --n-cpu-moe N` | keep the Mixture of Experts (MoE) weights of the first N layers in the CPU<br/>(env: LLAMA_ARG_N_CPU_MOE) |
-| `--moe-cache-mib N` | GPU cache size in MiB for the MoE experts kept in the CPU. with multiple GPUs, it is split among them like the layers (--tensor-split) (default: 0, disabled)<br/>(env: LLAMA_ARG_MOE_CACHE_MIB) |
+| `--moe-cache-mib N` | GPU cache size in MiB for the MoE experts kept in the CPU. with multiple GPUs, it is split among them by --moe-cache-split,<br/>else by --tensor-split, else by the free memory of each GPU (default: 0, disabled)<br/>(env: LLAMA_ARG_MOE_CACHE_MIB) |
+| `--moe-cache-hybrid, --no-moe-cache-hybrid` | with --moe-cache-mib: the GPU runs the cached experts while the CPU runs the misses, which are cached by decayed access count (default: disabled) [EXPERIMENTAL]<br/>(env: LLAMA_ARG_MOE_CACHE_HYBRID) |
+| `--moe-cache-half-life N` | hybrid MoE cache: half-life in decode steps of the access counts that decide which experts are cached (default: 64)<br/>(env: LLAMA_ARG_MOE_CACHE_HALF_LIFE) |
+| `--moe-cache-prefetch N` | with --moe-cache-mib: upload the experts of the next N expert tensors while a large batch (prompt processing) computes,<br/>each needs memory on the first GPU for the largest expert tensor, on top of --moe-cache-mib, 1-3 hide most of the compute<br/>behind the uploads (0-8, default: 0 = disabled) [EXPERIMENTAL]<br/>(env: LLAMA_ARG_MOE_CACHE_PREFETCH) |
+| `--moe-cache-gpu-misses N` | with --moe-cache-hybrid: up to N missed experts per layer step are uploaded to transient slots and run on the GPU while the CPU runs<br/>the others, when the GPU would otherwise wait for the CPU; the slots come out of --moe-cache-mib (0-64, default: 0 = all misses on the CPU) [EXPERIMENTAL]<br/>(env: LLAMA_ARG_MOE_CACHE_GPU_MISSES) |
+| `--moe-cache-split N0,N1,N2,...` | with --moe-cache-mib: share of the MoE cache per GPU, comma-separated proportions like --tensor-split<br/>(default: by --tensor-split, else by the free memory of each GPU)<br/>(env: LLAMA_ARG_MOE_CACHE_SPLIT) |
 | `-ncffn, --n-cpu-ffn N` | keep the dense FFN weights of the first N layers in the CPU<br/>(dense models; for MoE expert weights use --n-cpu-moe)<br/>(env: LLAMA_ARG_N_CPU_FFN) |
 | `-ngl, --gpu-layers, --n-gpu-layers N` | max. number of layers to store in VRAM, either an exact number, 'auto', or 'all' (default: auto)<br/>(env: LLAMA_ARG_N_GPU_LAYERS) |
 | `-sm, --split-mode {none,layer,row,tensor}` | how to split the model across multiple GPUs, one of:<br/>- none: use one GPU only<br/>- layer (default): split layers and KV across GPUs (pipelined)<br/>- row: split weight across GPUs by rows (parallelized)<br/>- tensor: split weights and KV across GPUs (parallelized, EXPERIMENTAL)<br/>(env: LLAMA_ARG_SPLIT_MODE) |

@@ -2799,7 +2799,8 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_env("LLAMA_ARG_N_CPU_MOE"));
     add_opt(common_arg(
         {"--moe-cache-mib"}, "N",
-        "GPU cache size in MiB for the MoE experts kept in the CPU. with multiple GPUs, it is split among them like the layers (--tensor-split) (default: 0, disabled)",
+        "GPU cache size in MiB for the MoE experts kept in the CPU. with multiple GPUs, it is split among them by --moe-cache-split,\n"
+        "else by --tensor-split, else by the free memory of each GPU (default: 0, disabled)",
         [](common_params & params, int value) {
             if (value < 0) {
                 throw std::invalid_argument("invalid value");
@@ -2828,7 +2829,8 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     add_opt(common_arg(
         {"--moe-cache-prefetch"}, "N",
         "with --moe-cache-mib: upload the experts of the next N expert tensors while a large batch (prompt processing) computes,\n"
-        "each needs device memory for the largest expert tensor, 1-3 hide most of the compute behind the uploads (default: 0 = disabled) [EXPERIMENTAL]",
+        "each needs memory on the first GPU for the largest expert tensor, on top of --moe-cache-mib, 1-3 hide most of the compute\n"
+        "behind the uploads (0-8, default: 0 = disabled) [EXPERIMENTAL]",
         [](common_params & params, int value) {
             if (value < 0 || value > 8) {
                 throw std::invalid_argument("invalid value");
@@ -2839,7 +2841,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     add_opt(common_arg(
         {"--moe-cache-gpu-misses"}, "N",
         "with --moe-cache-hybrid: up to N missed experts per layer step are uploaded to transient slots and run on the GPU while the CPU runs\n"
-        "the others, when the GPU would otherwise wait for the CPU (default: 0 = all misses on the CPU) [EXPERIMENTAL]",
+        "the others, when the GPU would otherwise wait for the CPU; the slots come out of --moe-cache-mib (0-64, default: 0 = all misses on the CPU) [EXPERIMENTAL]",
         [](common_params & params, int value) {
             if (value < 0 || value > 64) {
                 throw std::invalid_argument("invalid value");
@@ -2849,7 +2851,8 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_env("LLAMA_ARG_MOE_CACHE_GPU_MISSES"));
     add_opt(common_arg(
         {"--moe-cache-split"}, "N0,N1,N2,...",
-        "with --moe-cache-mib: share of the MoE cache per GPU, comma-separated proportions like --tensor-split (default: like the layers)",
+        "with --moe-cache-mib: share of the MoE cache per GPU, comma-separated proportions like --tensor-split\n"
+        "(default: by --tensor-split, else by the free memory of each GPU)",
         [](common_params & params, const std::string & value) {
             const std::regex regex{ R"([,/]+)" };
             std::sregex_token_iterator it{ value.begin(), value.end(), regex, -1 };
@@ -2861,6 +2864,11 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
             for (size_t i = 0; i < llama_max_devices(); ++i) {
                 params.moe_cache_split[i] = i < split_arg.size() ? std::stof(split_arg[i]) : 0.0f;
+            }
+            for (size_t i = 0; i < split_arg.size(); ++i) {
+                if (!std::isfinite(params.moe_cache_split[i]) || params.moe_cache_split[i] < 0.0f) {
+                    throw std::invalid_argument("invalid value");
+                }
             }
         }
     ).set_env("LLAMA_ARG_MOE_CACHE_SPLIT"));

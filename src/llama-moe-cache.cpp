@@ -321,8 +321,9 @@ struct llama_moe_cache::impl {
 
     static constexpr int64_t max_batch = 32;
 
-    // hybrid mode: batches up to this size run their misses on the CPU, the scheduler offloads larger ones (GGML_OP_OFFLOAD_MIN_BATCH)
-    static constexpr int64_t max_batch_hybrid = 16;
+    // hybrid mode: batches up to this size run their misses on the CPU, larger ones upload the experts they use (op offload);
+    // measured (one sequence, 8 threads, PCIe 4.0): the CPU wins up to ~150-200 tokens, 2-2.6x faster at 17-64 tokens
+    static constexpr int64_t max_batch_hybrid = 128;
 
     int32_t n_expert_used;
 
@@ -377,8 +378,9 @@ struct llama_moe_cache::impl {
         std::vector<const ggml_tensor *> window;
     };
 
-    // ubatches from this size on read nearly every expert of a layer, so the prefetch uploads all the uncached ones
-    static constexpr int64_t prefetch_min_batch = 256;
+    // the prefetch uploads every uncached expert of a tensor, the plain upload only those a batch reads: measured, the prefetch
+    // wins at 2048-token ubatches and loses below about 1024 tokens (144 vs 186 t/s at 512)
+    static constexpr int64_t prefetch_min_batch = 1536;
 
     int32_t prefetch_depth = 0;
     prefetcher pf;
@@ -502,7 +504,8 @@ struct llama_moe_cache::impl {
             } else {
                 const auto it = std::find_if(model.devices.begin(), model.devices.end(), [&](const llama_device & ld) { return ld.dev == dev; });
                 GGML_ASSERT(it != model.devices.end());
-                d.split = (double) tensor_split[it - model.devices.begin()];
+                const float x = tensor_split[it - model.devices.begin()];
+                d.split = std::isfinite(x) && x > 0.0f ? (double) x : 0.0;
             }
             split_sum += d.split;
         }
@@ -562,7 +565,11 @@ struct llama_moe_cache::impl {
         ctx_host  = init_ctx(n_tensors_host);
         ctx_views = init_ctx(2);
 
-        ggml_backend_buffer_type_t buft_host = ggml_backend_cpu_buffer_type();
+        // pinned when the device has a host buffer type: every lookup copies the slot map up and the CPU half's inputs down
+        ggml_backend_buffer_type_t buft_host = ggml_backend_dev_host_buffer_type(ggml_backend_get_device(devices[0].backend));
+        if (buft_host == nullptr) {
+            buft_host = ggml_backend_cpu_buffer_type();
+        }
         const size_t alignment_host = ggml_backend_buft_get_alignment(buft_host);
 
         for (size_t ig = 0; ig < groups.size(); ++ig) {

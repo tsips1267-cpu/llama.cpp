@@ -2315,7 +2315,9 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         ggml_tensor * s    = ggml_cast(ctx0, slots, GGML_TYPE_F32);
         ggml_tensor * miss = ggml_clamp(ctx0, ggml_scale(ctx0, s, -1.0f), 0.0f, 1.0f);
         ggml_tensor * pos  = ggml_arange(ctx0, (float) zero + 1.0f, (float) (zero + 1 + n_expert_used), 1.0f);
-        ggml_backend_sched_set_tensor_backend(sched, pos, moe_cache->backend(il));
+        if (ggml_backend_supports_op(moe_cache->backend(il), pos)) {
+            ggml_backend_sched_set_tensor_backend(sched, pos, moe_cache->backend(il));
+        }
         slots = ggml_cast(ctx0, ggml_add(ctx0, s, ggml_mul(ctx0, miss, pos)), GGML_TYPE_I32);
         ggml_build_forward_expand(gf, slots);
 

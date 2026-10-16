@@ -934,6 +934,25 @@ ggml_tensor * llama_model_qwen4exp::graph::build_attn_qsa(
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
     ggml_tensor * v = mctx_cur->get_v(ctx0, il);
 
+    // flash attention reads the padded selection mask by its row stride; a backend whose kernels read the rows contiguously
+    // (Vulkan, WebGPU, CANN) rejects it, then give it a contiguous copy instead of a fallback to the CPU
+    ggml_backend_t backend_fa = nullptr;
+    for (int i = 0; i < ggml_backend_sched_get_n_backends(sched) && backend_fa == nullptr; ++i) {
+        ggml_backend_t b = ggml_backend_sched_get_backend(sched, i);
+        backend_fa = ggml_backend_get_device(b) == model.dev_layer(il) ? b : nullptr;
+    }
+    auto fa_mask = [&](ggml_tensor * q_m, ggml_tensor * k_m, ggml_tensor * v_m, ggml_tensor * m) {
+        if (!cparams.flash_attn || backend_fa == nullptr || ggml_is_contiguous(m)) {
+            return m;
+        }
+        // the layout build_attn_mha passes to flash attention
+        const int64_t ns = k_m->ne[3];
+        ggml_tensor * q_p = ggml_view_4d(ctx0, q_m, q_m->ne[0], q_m->ne[1], q_m->ne[2]/ns, ns, q_m->nb[1], q_m->nb[2], q_m->nb[2]*(q_m->ne[2]/ns), 0);
+        ggml_tensor * probe = ggml_flash_attn_ext(ctx0, ggml_permute(ctx0, q_p, 0, 2, 1, 3), ggml_permute(ctx0, k_m, 0, 2, 1, 3),
+                ggml_permute(ctx0, v_m, 0, 2, 1, 3), m, kq_scale, hparams.f_max_alibi_bias, 0.0f);
+        return ggml_backend_supports_op(backend_fa, probe) ? m : ggml_cont(ctx0, m);
+    };
+
     // a cache in mapped host memory is read in place, n_sel rows per token,
     // unless the batch reads more rows than the cache holds: then copy the cache to the device first
     ggml_tensor * cur = nullptr;
@@ -953,7 +972,7 @@ ggml_tensor * llama_model_qwen4exp::graph::build_attn_qsa(
             cb(k_s, "k_staged", il);
             cb(v_s, "v_staged", il);
 
-            ggml_tensor * cur_s = build_attn_mha(q_s, k_s, v_s, nullptr, m_s, nullptr, nullptr, n_sel, kq_scale, il);
+            ggml_tensor * cur_s = build_attn_mha(q_s, k_s, v_s, nullptr, fa_mask(q_s, k_s, v_s, m_s), nullptr, nullptr, n_sel, kq_scale, il);
             ggml_build_forward_expand(gf, cur_s);
 
             cur = cur ? ggml_concat(ctx0, cur, cur_s, 1) : cur_s;
@@ -965,7 +984,7 @@ ggml_tensor * llama_model_qwen4exp::graph::build_attn_qsa(
             cb(k, "k_staged", il);
             cb(v, "v_staged", il);
         }
-        cur = build_attn_mha(q, k, v, nullptr, sel, nullptr, nullptr, n_sel, kq_scale, il);
+        cur = build_attn_mha(q, k, v, nullptr, fa_mask(q, k, v, sel), nullptr, nullptr, n_sel, kq_scale, il);
     }
     cb(cur, "kqv_out", il);
 
