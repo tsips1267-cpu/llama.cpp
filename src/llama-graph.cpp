@@ -2288,10 +2288,12 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     // hybrid MoE cache: the GPU runs the cached experts while the CPU runs the misses
     ggml_tensor * cpu_inp = moe_cache && moe_cache->hybrid() ? moe_cache->get_cpu_inp(il) : nullptr;
     const auto has_hdmd = [&](ggml_tensor * w) { return hdmd && hdmd->rot.find(w) != hdmd->rot.end(); };
+    // the host copies of the CPU half have rows of n_embd inputs and of the cache's top-k ids (not the warmup's)
     const bool moe_hybrid = cpu_inp && gate_exps && up_exps && !gate_up_exps &&
         !up_exps_b && !gate_exps_b && !down_exps_b && !up_exps_s && !gate_exps_s && !down_exps_s &&
         type_op == LLM_FFN_SILU && !weight_before_ffn && loras->empty() && hparams.swiglu_clamp_exp[il] <= 1e-6f &&
         !has_hdmd(up_exps) && !has_hdmd(gate_exps) && !has_hdmd(down_exps) &&
+        n_embd == cpu_inp->ne[0] && n_expert_used == moe_cache->get_cpu_ids(il)->ne[0] &&
         moe_cache->get_slot_map(il, n_tokens, n_expert_used) != nullptr;
 
     // the lookup reads the inputs of the CPU half, they must be contiguous and computed before it
@@ -2301,7 +2303,10 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     }
 
     // the experts of host-resident layers may be read from the MoE cache
-    ggml_tensor * slots = build_moe_cache_slots(selected_experts, up_exps, gate_exps, down_exps, gate_up_exps, il);
+    // in hybrid mode the lookup of a small batch plans for a CPU half: a layer that cannot split (e.g. with a LoRA adapter)
+    // runs its experts from the host weights instead
+    ggml_tensor * slots = cpu_inp && !moe_hybrid ? nullptr :
+        build_moe_cache_slots(selected_experts, up_exps, gate_exps, down_exps, gate_up_exps, il);
     GGML_ASSERT(!moe_hybrid || slots != nullptr);
 
     if (moe_hybrid) {
@@ -2485,7 +2490,12 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
         ggml_tensor * up_c   = ggml_mul_mat_id(ctx0, up_exps,   x, ids);
         ggml_tensor * gate_c = ggml_mul_mat_id(ctx0, gate_exps, x, ids);
-        ggml_tensor * exp_c  = ggml_mul_mat_id(ctx0, down_exps, ggml_swiglu_split(ctx0, gate_c, up_c), ids);
+        ggml_tensor * act_c  = ggml_swiglu_split(ctx0, gate_c, up_c);
+        ggml_tensor * exp_c  = ggml_mul_mat_id(ctx0, down_exps, act_c, ids);
+        // the ids of the hits are -1, which only the CPU skips: keep op offload (GGML_OP_OFFLOAD_MIN_BATCH) away from them
+        for (ggml_tensor * t : { up_c, gate_c, act_c, exp_c }) {
+            ggml_backend_sched_set_tensor_backend(sched, t, backend_cpu);
+        }
         cb(exp_c, "ffn_moe_down_cpu", il);
 
         experts = ggml_add(ctx0, experts, exp_c);

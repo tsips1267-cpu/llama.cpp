@@ -220,7 +220,8 @@ llama_kv_cache::llama_kv_cache(
             auto * dev = model.dev_layer(il);
             buft = ggml_backend_dev_buffer_type(dev);
 
-            if (host_mapped) {
+            // a layer on the CPU keeps its cache in host memory anyway
+            if (host_mapped && ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_CPU) {
                 auto get_mapped = (ggml_backend_dev_mapped_buffer_type_t)
                     ggml_backend_reg_get_proc_address(ggml_backend_dev_backend_reg(dev), "ggml_backend_dev_mapped_buffer_type");
                 ggml_backend_buffer_type_t buft_mapped = get_mapped ? get_mapped(dev) : nullptr;
@@ -2828,7 +2829,7 @@ void llama_kv_cache::state_clear(llama_seq_id seq_id, uint32_t strm, const slot_
 llama_kv_cache_context::llama_kv_cache_context(llama_memory_status status) : status(status) {}
 
 llama_kv_cache_context::llama_kv_cache_context(
-        llama_kv_cache * kv) : status(LLAMA_MEMORY_STATUS_SUCCESS), kv(kv) {
+        llama_kv_cache * kv) : status(LLAMA_MEMORY_STATUS_SUCCESS), kv(kv), full(true) {
     n_kv = kv->get_size();
 
     const uint32_t n_stream = kv->get_n_stream();
@@ -2904,6 +2905,10 @@ uint32_t llama_kv_cache_context::get_n_kv() const {
 
 bool llama_kv_cache_context::get_host_mapped() const {
     return kv->get_host_mapped();
+}
+
+bool llama_kv_cache_context::is_full() const {
+    return full;
 }
 
 ggml_type llama_kv_cache_context::type_k() const {

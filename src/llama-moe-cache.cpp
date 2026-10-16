@@ -421,6 +421,19 @@ struct llama_moe_cache::impl {
         if (devices.empty()) {
             throw std::runtime_error("MoE cache requires a GPU backend");
         }
+        // the prefetch and the GPU misses order their streams against the compute stream with events
+        if (prefetch_depth > 0 || n_gpu_miss > 0) {
+            for (const device & d : devices) {
+                ggml_backend_dev_props props;
+                ggml_backend_dev_get_props(ggml_backend_get_device(d.backend), &props);
+                if (!props.caps.events) {
+                    LLAMA_LOG_WARN("%s: %s has no events, the MoE cache prefetch and GPU misses are disabled\n", __func__, ggml_backend_name(d.backend));
+                    prefetch_depth = 0;
+                    n_gpu_miss     = 0;
+                    break;
+                }
+            }
+        }
         if (model.split_mode() == LLAMA_SPLIT_MODE_TENSOR) {
             throw std::runtime_error("MoE cache does not support tensor parallelism");
         }
@@ -429,7 +442,8 @@ struct llama_moe_cache::impl {
         }
 
         // only cache layers that keep all of their experts in host memory, on the device the layer is assigned to
-        for (size_t il = 0; il < model.layers.size(); ++il) {
+        // the trailing MTP layers run in a draft context, which has no MoE cache
+        for (size_t il = 0; il + model.hparams.n_layer_nextn < model.layers.size(); ++il) {
             auto experts = llama_moe_cache_layer_experts(model.layers[il]);
             if (experts.empty() || !std::all_of(experts.begin(), experts.end(), llama_moe_cache_is_host_weight)) {
                 continue;

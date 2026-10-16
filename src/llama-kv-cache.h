@@ -408,6 +408,9 @@ public:
 
     bool get_host_mapped() const;
 
+    // the context of the whole cache, which the graph reserve builds with
+    bool is_full() const;
+
     ggml_type type_k() const;
     ggml_type type_v() const;
 
@@ -451,6 +454,8 @@ private:
 
     llama_kv_cache * kv;
     llama_context * lctx;
+
+    bool full = false;
 
     //
     // update context

@@ -1387,7 +1387,19 @@ static bool ggml_backend_buft_is_cuda_mapped(ggml_backend_buffer_type_t buft) {
     return buft->iface.get_name == ggml_backend_cuda_mapped_buffer_type_name;
 }
 
+#ifndef NDEBUG
+static bool ggml_backend_cuda_buft_is_own_mapped(ggml_backend_buffer_type_t buft, int device) {
+    return ggml_backend_buft_is_cuda_mapped(buft) && ((ggml_backend_cuda_mapped_buffer_type_context *) buft->context)->device == device;
+}
+#endif // NDEBUG
+
 static ggml_backend_buffer_t ggml_backend_cuda_mapped_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft, size_t size) {
+#if defined(GGML_USE_MUSA)
+    // MUSA lacks the host-mapped pinned-memory APIs
+    GGML_UNUSED(buft);
+    GGML_LOG_ERROR("%s: mapped pinned memory is not supported on MUSA (%.2f MiB)\n", __func__, size/1024.0/1024.0);
+    return nullptr;
+#else
     void * ptr = nullptr;
     // portable: other devices may copy from it; mapped: the kernels use the host pointer, which needs unified addressing
     cudaError_t err = cudaHostAlloc(&ptr, std::max<size_t>(size, 1), cudaHostAllocPortable | cudaHostAllocMapped);
@@ -1396,15 +1408,22 @@ static ggml_backend_buffer_t ggml_backend_cuda_mapped_buffer_type_alloc_buffer(g
         GGML_LOG_ERROR("%s: failed to allocate %.2f MiB of mapped pinned memory: %s\n", __func__, size/1024.0/1024.0, cudaGetErrorString(err));
         return nullptr;
     }
+    // the kernels use the host pointer, which needs unified addressing
     void * dev_ptr = nullptr;
-    CUDA_CHECK(cudaHostGetDevicePointer(&dev_ptr, ptr, 0));
-    GGML_ASSERT(dev_ptr == ptr && "mapped pinned memory requires unified addressing");
+    err = cudaHostGetDevicePointer(&dev_ptr, ptr, 0);
+    if (err != cudaSuccess || dev_ptr != ptr) {
+        (void) cudaGetLastError();
+        cudaFreeHost(ptr);
+        GGML_LOG_ERROR("%s: mapped pinned memory needs unified addressing\n", __func__);
+        return nullptr;
+    }
 
     ggml_backend_buffer_t buffer = ggml_backend_cpu_buffer_from_ptr(ptr, size);
     buffer->buft = buft;
     buffer->iface.free_buffer = ggml_backend_cuda_host_buffer_free_buffer;
 
     return buffer;
+#endif // defined(GGML_USE_MUSA)
 }
 
 ggml_backend_buffer_type_t ggml_backend_cuda_mapped_buffer_type(int device) {
@@ -4671,12 +4690,15 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                 // On integrated GPUs (APUs, e.g. RDNA3.5) the scheduler may place a
                 // node's output on the host-visible buffer, which the compute path
                 // handles. Allow that here, mirroring the src-tensor check below.
+                // a cache in mapped host memory of the device is read and written in place
                 assert(node->buffer->buft == ggml_backend_cuda_buffer_type(cuda_ctx->device) ||
+                       ggml_backend_cuda_buft_is_own_mapped(node->buffer->buft, cuda_ctx->device) ||
                        (integrated && ggml_backend_buft_is_cuda_host(node->buffer->buft)));
                 for (int j = 0; j < GGML_MAX_SRC; j++) {
                     if (node->src[j] != nullptr) {
                         assert(node->src[j]->buffer);
                         assert(node->src[j]->buffer->buft == ggml_backend_cuda_buffer_type(cuda_ctx->device) ||
+                               ggml_backend_cuda_buft_is_own_mapped(node->src[j]->buffer->buft, cuda_ctx->device) ||
                                (integrated && ggml_backend_buft_is_cuda_host(node->src[j]->buffer->buft)));
                     }
                 }

@@ -877,7 +877,8 @@ ggml_tensor * llama_model_qwen4exp::graph::build_qsa_sel(
     // kq_mask adds nothing: only its shape is used, which leaves it unallocated and unfilled
     // an image (an embd batch) orders the tokens of a temporal position in raster order, which kq_mask enforces and the selection
     // does not when the image's cells wrap around the cache; the softmax without flash attention needs a contiguous mask
-    if (ubatch.token == nullptr || !cparams.flash_attn) {
+    // note: the graph reserve builds a text batch, so an image batch at a deep context allocates kq_mask beyond it
+    if (ubatch.token == nullptr || ubatch.is_mixed() || !cparams.flash_attn) {
         sel = ggml_add(ctx0, sel, kq_mask);
     }
     cb(sel, "indexer_sel", il);
@@ -939,7 +940,8 @@ ggml_tensor * llama_model_qwen4exp::graph::build_attn_qsa(
     const int64_t n_stream = k->ne[3];
     const int64_t n_kv     = k->ne[2];
     // the copy keeps the flash attention layout, without flash attention V is transposed: then read the mapped cache in place
-    const bool staged = cparams.flash_attn && mctx_cur->get_host_mapped() && (n_tokens/n_stream)*n_sel > n_kv;
+    // the reserve stages its full cache: a batch of fewer streams or a shorter cache can stage where the reserve would not
+    const bool staged = cparams.flash_attn && mctx_cur->get_host_mapped() && (mctx_cur->is_full() || (n_tokens/n_stream)*n_sel > n_kv);
     if (staged && n_stream > 1) {
         // one stream at a time, so that only one stream's copy of the cache is alive, which the graph reserve accounts for
         const int64_t n_tps = n_tokens/n_stream;

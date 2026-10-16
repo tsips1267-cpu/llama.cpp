@@ -555,6 +555,11 @@ llama_context::llama_context(
         }
 
         if (cparams.moe_cache_size > 0) {
+            // the prefetch feeds the large batches that op offload sends to the GPU
+            if (cparams.moe_cache_prefetch > 0 && !cparams.op_offload) {
+                LLAMA_LOG_WARN("%s: the MoE cache prefetch needs op offload, disabled\n", __func__);
+                cparams.moe_cache_prefetch = 0;
+            }
             moe_cache = std::make_unique<llama_moe_cache>(model, backend_ptrs, backend_buft, cparams.moe_cache_size,
                 cparams.moe_cache_hybrid, cparams.moe_cache_half_life, cparams.moe_cache_prefetch, params.moe_cache_split, cparams.moe_cache_gpu_misses);
         }
