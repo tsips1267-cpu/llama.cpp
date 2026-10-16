@@ -422,13 +422,13 @@ struct llama_moe_cache::impl {
             throw std::runtime_error("MoE cache requires a GPU backend");
         }
         // the prefetch and the GPU misses order their streams against the compute stream with events
-        if (prefetch_depth > 0 || n_gpu_miss > 0) {
+        if (this->prefetch_depth > 0 || n_gpu_miss > 0) {
             for (const device & d : devices) {
                 ggml_backend_dev_props props;
                 ggml_backend_dev_get_props(ggml_backend_get_device(d.backend), &props);
                 if (!props.caps.events) {
                     LLAMA_LOG_WARN("%s: %s has no events, the MoE cache prefetch and GPU misses are disabled\n", __func__, ggml_backend_name(d.backend));
-                    prefetch_depth = 0;
+                    this->prefetch_depth = 0;
                     n_gpu_miss     = 0;
                     break;
                 }
@@ -669,7 +669,7 @@ struct llama_moe_cache::impl {
             }
         }
 
-        if (prefetch_depth > 0) {
+        if (this->prefetch_depth > 0) {
             // sized also without an allocation, the memory breakdown counts the buffers
             init_prefetch(!model.hparams.no_alloc);
         }
@@ -1165,7 +1165,7 @@ struct llama_moe_cache::impl {
         if (hybrid && il == il_last && ++n_window == 256) {
             const stats & w = stats_window;
             const size_t  n = st.hits - w.hits + st.misses - w.misses;
-            LLAMA_LOG_INFO("llama_moe_cache: hybrid, last %d steps: hit rate = %.2f%%, %.1f misses per step, %.1f of them on the GPU, uploaded %.1f MiB per step\n",
+            LLAMA_LOG_DEBUG("llama_moe_cache: hybrid, last %d steps: hit rate = %.2f%%, %.1f misses per step, %.1f of them on the GPU, uploaded %.1f MiB per step\n",
                 n_window, 100.0*(st.hits - w.hits)/std::max<size_t>(n, 1), double(st.misses - w.misses)/n_window,
                 double(n_gpu_missed - n_gpu_missed_window)/n_window, (st.bytes - w.bytes)/1024.0/1024.0/n_window);
             n_gpu_missed_window = n_gpu_missed;

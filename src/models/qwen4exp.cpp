@@ -941,7 +941,7 @@ ggml_tensor * llama_model_qwen4exp::graph::build_attn_qsa(
     const int64_t n_kv     = k->ne[2];
     // the copy keeps the flash attention layout, without flash attention V is transposed: then read the mapped cache in place
     // the reserve stages its full cache: a batch of fewer streams or a shorter cache can stage where the reserve would not
-    const bool staged = cparams.flash_attn && mctx_cur->get_host_mapped() && (mctx_cur->is_full() || (n_tokens/n_stream)*n_sel > n_kv);
+    const bool staged = cparams.flash_attn && mctx_cur->get_host_mapped(il) && (mctx_cur->is_full() || (n_tokens/n_stream)*n_sel > n_kv);
     if (staged && n_stream > 1) {
         // one stream at a time, so that only one stream's copy of the cache is alive, which the graph reserve accounts for
         const int64_t n_tps = n_tokens/n_stream;

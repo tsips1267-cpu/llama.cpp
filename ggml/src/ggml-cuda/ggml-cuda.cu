@@ -5506,10 +5506,12 @@ static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_host_buffer_type(
     return ggml_backend_cuda_host_buffer_type();
 }
 
+#if !defined(GGML_USE_MUSA)
 static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_mapped_buffer_type(ggml_backend_dev_t dev) {
     ggml_backend_cuda_device_context * ctx = (ggml_backend_cuda_device_context *) dev->context;
     return ggml_backend_cuda_mapped_buffer_type(ctx->device);
 }
+#endif
 
 // TODO: move these functions here
 static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
@@ -6156,9 +6158,12 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     if (strcmp(name, "ggml_backend_get_features") == 0) {
         return (void *)ggml_backend_cuda_get_features;
     }
+#if !defined(GGML_USE_MUSA)
+    // MUSA lacks the host-mapped pinned-memory APIs
     if (strcmp(name, "ggml_backend_dev_mapped_buffer_type") == 0) {
         return (void *)ggml_backend_cuda_device_get_mapped_buffer_type;
     }
+#endif
     return nullptr;
 }
 

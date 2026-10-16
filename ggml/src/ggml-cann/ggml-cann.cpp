@@ -2683,6 +2683,10 @@ static bool ggml_backend_cann_supports_op(ggml_backend_dev_t dev, const ggml_ten
                 if (op->src[4]) {
                     return false;
                 }
+                // the mask is passed with contiguous rows
+                if (op->src[3] && op->src[3]->nb[1] != op->src[3]->ne[0]*ggml_type_size(op->src[3]->type)) {
+                    return false;
+                }
                 if (op->src[1]->ne[0] != op->src[2]->ne[0]) {
                     // different head sizes of K and V are not supported yet
                     return false;

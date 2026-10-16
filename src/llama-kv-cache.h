@@ -164,7 +164,8 @@ public:
     bool get_has_shift() const;
 
     // the tensors are in pinned host memory that the devices read in place
-    bool get_host_mapped() const { return host_mapped; }
+    // whether the cache of model layer il is in mapped host memory
+    bool get_host_mapped(int32_t il) const;
 
     ggml_type type_k() const;
     ggml_type type_v() const;
@@ -269,6 +270,9 @@ private:
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
+
+        // in mapped host memory, which the device reads in place
+        bool mapped = false;
     };
 
     bool v_trans = true;  // the value tensor is transposed
@@ -406,7 +410,7 @@ public:
 
     uint32_t get_n_kv() const;
 
-    bool get_host_mapped() const;
+    bool get_host_mapped(int32_t il) const;
 
     // the context of the whole cache, which the graph reserve builds with
     bool is_full() const;

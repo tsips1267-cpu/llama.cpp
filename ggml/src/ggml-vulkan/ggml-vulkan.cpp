@@ -15557,6 +15557,10 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
                 if (op->src[3] && op->src[3]->type != GGML_TYPE_F16) {
                     return false;
                 }
+                // the shaders read the rows of the mask contiguously
+                if (op->src[3] && op->src[3]->nb[1] != op->src[3]->ne[0]*ggml_type_size(op->src[3]->type)) {
+                    return false;
+                }
                 auto fa_kv_ok = [](ggml_type t) {
                     switch (t) {
                     case GGML_TYPE_F32:

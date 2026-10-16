@@ -215,6 +215,7 @@ llama_kv_cache::llama_kv_cache(
         const char * dev_name = "CPU";
 
         ggml_backend_buffer_type_t buft = ggml_backend_cpu_buffer_type();
+        bool mapped = false;
 
         if (offload) {
             auto * dev = model.dev_layer(il);
@@ -228,7 +229,8 @@ llama_kv_cache::llama_kv_cache(
                 if (buft_mapped == nullptr) {
                     throw std::runtime_error(format("device %s cannot keep the KV cache in mapped host memory", ggml_backend_dev_name(dev)));
                 }
-                buft = buft_mapped;
+                buft   = buft_mapped;
+                mapped = true;
             }
 
             dev_name = ggml_backend_dev_name(dev);
@@ -260,7 +262,7 @@ llama_kv_cache::llama_kv_cache(
 
         map_layer_ids[il] = layers.size();
 
-        layers.push_back({ il, k, v, k_stream, v_stream, });
+        layers.push_back({ il, k, v, k_stream, v_stream, mapped });
     }
 
     if (reuse) {
@@ -2903,8 +2905,13 @@ uint32_t llama_kv_cache_context::get_n_kv() const {
     return n_kv;
 }
 
-bool llama_kv_cache_context::get_host_mapped() const {
-    return kv->get_host_mapped();
+bool llama_kv_cache::get_host_mapped(int32_t il) const {
+    const auto it = map_layer_ids.find(il);
+    return it != map_layer_ids.end() && layers[it->second].mapped;
+}
+
+bool llama_kv_cache_context::get_host_mapped(int32_t il) const {
+    return kv->get_host_mapped(il);
 }
 
 bool llama_kv_cache_context::is_full() const {
