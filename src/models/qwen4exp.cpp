@@ -873,12 +873,11 @@ ggml_tensor * llama_model_qwen4exp::graph::build_qsa_sel(
     sel = ggml_view_4d(ctx0, sel, n_kv, kq_mask->ne[1], kq_mask->ne[2], kq_mask->ne[3],
             row, row*kq_mask->ne[1], row*kq_mask->ne[1]*kq_mask->ne[2], 0);
 
-    // a live slot is a visible cell of the token's own sequence, so for text the selection is already causal and the dense
-    // kq_mask adds nothing: only its shape is used, which leaves it unallocated and unfilled
-    // an image (an embd batch) orders the tokens of a temporal position in raster order, which kq_mask enforces and the selection
-    // does not when the image's cells wrap around the cache; the softmax without flash attention needs a contiguous mask
-    // note: the graph reserve builds a text batch, so an image batch at a deep context allocates kq_mask beyond it
-    if (ubatch.token == nullptr || ubatch.is_mixed() || !cparams.flash_attn) {
+    // a live slot is a visible cell of the token's own sequence, so the selection is already causal and the dense kq_mask
+    // adds nothing: only its shape is used, which leaves it unallocated and unfilled. this holds for an image too, whose
+    // tokens share a temporal position: the pools rank them in raster order, as kq_mask does, see kpool_cell_lt
+    // the softmax without flash attention needs a contiguous mask
+    if (!cparams.flash_attn) {
         sel = ggml_add(ctx0, sel, kq_mask);
     }
     cb(sel, "indexer_sel", il);

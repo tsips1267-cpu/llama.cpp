@@ -89,9 +89,10 @@ bool ggml_sycl_flash_attn_ext_onednn_supported(const ggml_tensor * dst, bool use
     // gate for the following cases
     // 1. if the oneDNN graph Add node has no input --> skip
     // 2. types other than f16 need different logical_tensor declaration
-    // 3. the mask must be shape [1, 1, q, seq]
+    // 3. the mask must be shape [1, 1, q, seq] with contiguous rows, the graph declares it dense
     // 4. sinks: excludes attention sink (Xiao et al., 2024) that can't be modeled by oneDNN graph
-    if (!mask || mask->type != GGML_TYPE_F16 || mask->ne[2] != 1 || mask->ne[3] != 1 || sinks) {
+    if (!mask || mask->type != GGML_TYPE_F16 || mask->ne[2] != 1 || mask->ne[3] != 1 || sinks ||
+        mask->nb[1] != (size_t) mask->ne[0] * sizeof(ggml_fp16_t)) {
         return false;
     }
     float max_bias = 0.0f, logit_softcap = 0.0f;

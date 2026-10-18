@@ -560,6 +560,11 @@ llama_context::llama_context(
                 LLAMA_LOG_WARN("%s: the MoE cache prefetch needs op offload, disabled\n", __func__);
                 cparams.moe_cache_prefetch = 0;
             }
+            if (cparams.moe_cache_prefetch > 0 && cparams.n_ubatch < llama_moe_cache::prefetch_min_batch) {
+                LLAMA_LOG_WARN("%s: the MoE cache prefetch runs for ubatches of %d tokens or more, n_ubatch = %u, disabled\n", __func__,
+                        (int) llama_moe_cache::prefetch_min_batch, cparams.n_ubatch);
+                cparams.moe_cache_prefetch = 0;
+            }
             moe_cache = std::make_unique<llama_moe_cache>(model, backend_ptrs, backend_buft, cparams.moe_cache_size,
                 cparams.moe_cache_hybrid, cparams.moe_cache_half_life, cparams.moe_cache_prefetch, params.moe_cache_split, cparams.moe_cache_gpu_misses);
         }

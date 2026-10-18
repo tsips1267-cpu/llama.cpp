@@ -49,6 +49,9 @@ public:
     int64_t copy_experts(ggml_backend_t backend, const ggml_tensor * w, ggml_tensor * dst, int64_t e, int64_t last);
 
     // for large batches: called after the experts of w were copied, upload the experts of the next expert tensors
+    // the prefetch uploads every uncached expert of a tensor, the plain upload only those a batch reads: measured, the prefetch
+    // wins at 2048-token ubatches and loses below about 1024 tokens (144 vs 186 t/s at 512)
+    static constexpr int64_t prefetch_min_batch = 1536;
     void prefetch_next(ggml_backend_t backend, const ggml_tensor * w, int64_t n_tokens);
 
     std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const;

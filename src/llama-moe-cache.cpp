@@ -378,10 +378,6 @@ struct llama_moe_cache::impl {
         std::vector<const ggml_tensor *> window;
     };
 
-    // the prefetch uploads every uncached expert of a tensor, the plain upload only those a batch reads: measured, the prefetch
-    // wins at 2048-token ubatches and loses below about 1024 tokens (144 vs 186 t/s at 512)
-    static constexpr int64_t prefetch_min_batch = 1536;
-
     int32_t prefetch_depth = 0;
     prefetcher pf;
     std::unordered_map<const ggml_tensor *, int32_t> seq_pos; // host experts -> position in pf.seq
@@ -405,11 +401,11 @@ struct llama_moe_cache::impl {
     ggml_context_ptr ctx_views;
 
     impl(const llama_model & model, const std::vector<ggml_backend_t> & backends, const std::vector<ggml_backend_buffer_type_t> & bufts, size_t size,
-         bool hybrid, float half_life, int32_t prefetch_depth, const float * split, int32_t gpu_misses) :
-            n_expert_used(model.hparams.n_expert_used_max()), hybrid(hybrid), half_life(std::max(1.0f, half_life)),
-            n_gpu_miss(hybrid ? std::max(0, gpu_misses) : 0),
+         bool use_hybrid, float half_life, int32_t prefetch_depth, const float * split, int32_t gpu_misses) :
+            n_expert_used(model.hparams.n_expert_used_max()), hybrid(use_hybrid), half_life(std::max(1.0f, half_life)),
+            n_gpu_miss(use_hybrid ? std::max(0, gpu_misses) : 0),
             prefetch_depth(std::max(0, prefetch_depth)), layers(model.layers.size()) {
-        if (!hybrid && gpu_misses > 0) {
+        if (!use_hybrid && gpu_misses > 0) {
             LLAMA_LOG_WARN("%s: GPU misses need the hybrid MoE cache, ignored\n", __func__);
         }
         for (size_t i = 0; i < backends.size(); ++i) {
@@ -422,6 +418,33 @@ struct llama_moe_cache::impl {
         }
         if (devices.empty()) {
             throw std::runtime_error("MoE cache requires a GPU backend");
+        }
+        // the hybrid lookup and its miss slots run on the cache's device, see build_moe_ffn: without these ops a layer would
+        // either assert on a missing lookup or split the graph between the lookup and the inputs of the CPU half
+        if (hybrid) {
+            ggml_init_params params = { 16*ggml_tensor_overhead(), nullptr, true };
+            ggml_context_ptr ctx { ggml_init(params) };
+            ggml_tensor * map   = ggml_new_tensor_2d(ctx.get(), GGML_TYPE_I32, 1, model.hparams.n_expert);
+            ggml_tensor * ids   = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_I32, n_expert_used);
+            ggml_tensor * slots = ggml_get_rows(ctx.get(), map, ids);
+            ggml_tensor * s     = ggml_cast(ctx.get(), ggml_reshape_2d(ctx.get(), slots, n_expert_used, 1), GGML_TYPE_F32);
+            ggml_tensor * neg   = ggml_scale(ctx.get(), s, -1.0f);
+            ggml_tensor * miss  = ggml_clamp(ctx.get(), neg, 0.0f, 1.0f);
+            ggml_tensor * pos   = ggml_arange(ctx.get(), 1.0f, 1.0f + n_expert_used, 1.0f);
+            ggml_tensor * off   = ggml_mul(ctx.get(), miss, pos);
+            ggml_tensor * sum   = ggml_add(ctx.get(), s, off);
+            ggml_tensor * out   = ggml_cast(ctx.get(), sum, GGML_TYPE_I32);
+            for (size_t id = 0; id < devices.size() && hybrid; ++id) {
+                for (ggml_tensor * t : { slots, s, neg, miss, pos, off, sum, out }) {
+                    if (!ggml_backend_supports_op(devices[id].backend, t)) {
+                        LLAMA_LOG_WARN("%s: %s cannot run the hybrid lookup (%s), the hybrid MoE cache is disabled\n", __func__,
+                                ggml_backend_name(devices[id].backend), ggml_op_desc(t));
+                        hybrid     = false;
+                        n_gpu_miss = 0;
+                        break;
+                    }
+                }
+            }
         }
         // the prefetch and the GPU misses order their streams against the compute stream with events
         if (this->prefetch_depth > 0 || n_gpu_miss > 0) {
@@ -566,7 +589,13 @@ struct llama_moe_cache::impl {
         ctx_views = init_ctx(2);
 
         // pinned when the device has a host buffer type: every lookup copies the slot map up and the CPU half's inputs down
+        // the copy runs the copy callback, a device that reads the host buffer in place (an integrated GPU) would skip it
         ggml_backend_buffer_type_t buft_host = ggml_backend_dev_host_buffer_type(ggml_backend_get_device(devices[0].backend));
+        for (const device & d : devices) {
+            if (buft_host != nullptr && ggml_backend_dev_supports_buft(ggml_backend_get_device(d.backend), buft_host)) {
+                buft_host = nullptr;
+            }
+        }
         if (buft_host == nullptr) {
             buft_host = ggml_backend_cpu_buffer_type();
         }

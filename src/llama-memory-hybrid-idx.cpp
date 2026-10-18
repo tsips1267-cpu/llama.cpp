@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <tuple>
 #include <type_traits>
 
 #include "llama-impl.h"
@@ -384,10 +385,34 @@ uint32_t kpool_pad(uint32_t n_pool) {
     return std::max<uint32_t>(64u, GGML_PAD(n_pool + 1, 64u));
 }
 
-// Rank of (pos, cell) in a sequence's cells sorted by position then cell, or -1 when absent.
-// In order mode the rank alone places a token: cells sharing a position (M-RoPE images) have distinct ranks.
-int64_t kpool_rank(const std::vector<std::pair<llama_pos, uint32_t>> & cells, llama_pos pos, uint32_t cell) {
-    auto it = std::lower_bound(cells.begin(), cells.end(), std::make_pair(pos, cell));
+// In order mode a sequence's cells go by position, and the cells sharing one (an M-RoPE image) by their 2D position,
+// which is the order the tokens came in. The cell order matches it only as long as the KV cache places the tokens of
+// a sequence in increasing cells, which qwen4exp relies on when it leaves out the dense mask.
+bool kpool_cell_lt(const llama_kv_cells & kv_cells, const std::pair<llama_pos, uint32_t> & a, const std::pair<llama_pos, uint32_t> & b) {
+    if (a.first != b.first) {
+        return a.first < b.first;
+    }
+    const auto & ea = kv_cells.ext_get(a.second);
+    const auto & eb = kv_cells.ext_get(b.second);
+    return std::tie(ea.y, ea.x, a.second) < std::tie(eb.y, eb.x, b.second);
+}
+
+// order the cells of each position from i0 on, see kpool_cell_lt
+void kpool_sort_runs(std::vector<std::pair<llama_pos, uint32_t>> & cells, size_t i0, const llama_kv_cells & kv_cells) {
+    for (size_t i = i0, j; i < cells.size(); i = j) {
+        for (j = i + 1; j < cells.size() && cells[j].first == cells[i].first; ++j) {}
+        if (j - i > 1) {
+            std::sort(cells.begin() + i, cells.begin() + j,
+                    [&](const auto & a, const auto & b) { return kpool_cell_lt(kv_cells, a, b); });
+        }
+    }
+}
+
+// Rank of (pos, cell) in a sequence's cells in order mode, or -1 when absent.
+// The rank alone places a token: cells sharing a position (M-RoPE images) have distinct ranks.
+int64_t kpool_rank(const std::vector<std::pair<llama_pos, uint32_t>> & cells, const llama_kv_cells & kv_cells, llama_pos pos, uint32_t cell) {
+    auto it = std::lower_bound(cells.begin(), cells.end(), std::make_pair(pos, cell),
+            [&](const auto & a, const auto & b) { return kpool_cell_lt(kv_cells, a, b); });
     return it != cells.end() && it->second == cell && it->first == pos ? it - cells.begin() : -1;
 }
 
@@ -432,17 +457,37 @@ const llama_memory_hybrid_idx::kpool_layout & llama_memory_hybrid_idx::kpool_lay
 
         sq.strm = unified ? 0 : mem_idx->get_stream(s);
 
-        if (mem_idx_stale[s] == POS_CLEAN && !sq.cells.empty() && !sp.empty() &&
-                sq.pos_min == sp.begin()->first) {
-            for (auto it = sp.upper_bound(sq.cells.back()); it != sp.end(); ++it) {
-                sq.cells.push_back(*it);
+        const bool by_order = hparams_idx.indexer_kpool_by_order;
+
+        bool regroup = mem_idx_stale[s] != POS_CLEAN;
+        if (!regroup && !sq.cells.empty() && !sp.empty() && sq.pos_min == sp.begin()->first) {
+            if (by_order) {
+                // read the last position again, the next ubatch of an image adds cells to it
+                // tokens that did not come in raster order can reorder cells already pooled: then regroup
+                const llama_pos p_last = sq.cells.back().first;
+                size_t i0 = sq.cells.size();
+                while (i0 > 0 && sq.cells[i0 - 1].first == p_last) {
+                    --i0;
+                }
+                const std::vector<std::pair<llama_pos, uint32_t>> pooled(sq.cells.begin() + i0, sq.cells.begin() + std::max(i0, sq.j_next));
+                sq.cells.resize(i0);
+                sq.cells.insert(sq.cells.end(), sp.lower_bound({ p_last, 0u }), sp.end());
+                kpool_sort_runs(sq.cells, i0, cells);
+                regroup = sq.cells.size() < i0 + pooled.size() || !std::equal(pooled.begin(), pooled.end(), sq.cells.begin() + i0);
+            } else {
+                for (auto it = sp.upper_bound(sq.cells.back()); it != sp.end(); ++it) {
+                    sq.cells.push_back(*it);
+                }
             }
         }
 
         // the appended tail accounts for every cell only if nothing before it was dropped, but an edit can
         // regroup a sequence without changing its cell count, so a stale sequence must rebuild regardless
-        if (sq.cells.size() != sp.size() || mem_idx_stale[s] != POS_CLEAN) {
+        if (regroup || sq.cells.size() != sp.size()) {
             sq.cells.assign(sp.begin(), sp.end());
+            if (by_order) {
+                kpool_sort_runs(sq.cells, 0, cells);
+            }
             sq.pools.clear();
             sq.j_next  = 0;
             sq.pos_min = sp.empty() ? 0 : sp.begin()->first;
@@ -450,7 +495,7 @@ const llama_memory_hybrid_idx::kpool_layout & llama_memory_hybrid_idx::kpool_lay
 
         // Pools start at the first valid token
         size_t j = sq.j_next;
-        if (hparams_idx.indexer_kpool_by_order) {
+        if (by_order) {
             // consecutive cells in sequence order, whatever their positions
             for (; j + kpool <= sq.cells.size(); j += kpool) {
                 sq.pools.push_back((uint32_t) j);
@@ -747,7 +792,7 @@ void llama_memory_hybrid_idx_context::kpool_build_state(const llama_ubatch & uba
             const llama_seq_id s = ubatch.seq_id[i][k];
             const auto & sq = lay.seqs[s];
             if (by_order) {
-                const int64_t r = kpool_rank(sq.cells, p, sinfo->idxs[i / n_tps][i % n_tps]);
+                const int64_t r = kpool_rank(sq.cells, idx->get_cells(s), p, sinfo->idxs[i / n_tps][i % n_tps]);
                 GGML_ASSERT(r >= 0);
                 if ((size_t) r / kpool < sq.pools.size()) {
                     mark(s, (size_t) r / kpool);
@@ -911,7 +956,8 @@ void llama_memory_hybrid_idx_context::set_input_kpool(ggml_tensor * pool_cells, 
 
         rank.resize(n_tokens);
         for (uint32_t i = 0; i < n_tokens; ++i) {
-            rank[i] = kpool_rank(lay.seqs[ubatch->seq_id[i][0]].cells, ubatch->pos[i], sinfo.idxs[i / n_tps][i % n_tps]);
+            const llama_seq_id s = ubatch->seq_id[i][0];
+            rank[i] = kpool_rank(lay.seqs[s].cells, mem->get_mem_idx()->get_cells(s), ubatch->pos[i], sinfo.idxs[i / n_tps][i % n_tps]);
             GGML_ASSERT(rank[i] >= 0);
         }
     }
@@ -1217,7 +1263,8 @@ void llama_memory_hybrid_idx_context::set_input_kpool_stream(ggml_tensor * pool_
         const uint32_t n_tsi = (uint32_t) sinfo.size();
         rank.resize(n_tokens);
         for (uint32_t i = 0; i < n_tokens; ++i) {
-            rank[i] = kpool_rank(lay.seqs[ubatch->seq_id[i][0]].cells, ubatch->pos[i], sinfo.idxs[i / n_tsi][i % n_tsi]);
+            const llama_seq_id s = ubatch->seq_id[i][0];
+            rank[i] = kpool_rank(lay.seqs[s].cells, idx->get_cells(s), ubatch->pos[i], sinfo.idxs[i / n_tsi][i % n_tsi]);
             GGML_ASSERT(rank[i] >= 0);
         }
     }

@@ -2828,7 +2828,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_env("LLAMA_ARG_MOE_CACHE_HALF_LIFE"));
     add_opt(common_arg(
         {"--moe-cache-prefetch"}, "N",
-        "with --moe-cache-mib: upload the experts of the next N expert tensors while a large batch (prompt processing) computes,\n"
+        "with --moe-cache-mib: upload the experts of the next N expert tensors while a ubatch of 1536 tokens or more (-ub) computes,\n"
         "each needs memory on the first GPU for the largest expert tensor, on top of --moe-cache-mib, 1-3 hide most of the compute\n"
         "behind the uploads (0-8, default: 0 = disabled) [EXPERIMENTAL]",
         [](common_params & params, int value) {
